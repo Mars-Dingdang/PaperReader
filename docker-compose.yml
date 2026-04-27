@@ -1,0 +1,50 @@
+version: '3.9'
+
+services:
+  redis:
+    image: redis:7
+    ports:
+      - '6379:6379'
+
+  backend:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.backend
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app/backend
+      - ./data:/app/data
+    working_dir: /app/backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - '8000:8000'
+    depends_on:
+      - redis
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.backend
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app/backend
+      - ./data:/app/data
+    working_dir: /app/backend
+    command: celery -A app.workers.tasks worker -l info
+    depends_on:
+      - redis
+
+  frontend:
+    image: node:20
+    working_dir: /app/frontend
+    volumes:
+      - ./frontend:/app/frontend
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
+    ports:
+      - '5173:5173'
+    environment:
+      - VITE_BACKEND_URL=http://localhost:8000
+    depends_on:
+      - backend
