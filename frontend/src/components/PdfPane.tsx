@@ -8,6 +8,7 @@ import {
   List,
   Maximize2,
   Rows3,
+  X,
   ZoomIn,
   ZoomOut
 } from 'lucide-react'
@@ -15,6 +16,10 @@ import {
 type Props = {
   title: string
   pdfUrl?: string
+  overrideUrl?: string
+  overrideTitle?: string
+  onAcceptDrop?: (payload: { url: string; name: string; kind: string }) => void
+  onClearOverride?: () => void
 }
 
 type OutlineItem = {
@@ -25,7 +30,7 @@ type OutlineItem = {
 
 type ViewMode = 'scroll' | 'single'
 
-export function PdfPane({ title, pdfUrl }: Props) {
+export function PdfPane({ title, pdfUrl, overrideUrl, overrideTitle, onAcceptDrop, onClearOverride }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const pageRefs = useRef<Array<HTMLDivElement | null>>([])
@@ -37,6 +42,10 @@ export function PdfPane({ title, pdfUrl }: Props) {
   const [outline, setOutline] = useState<OutlineItem[]>([])
   const [outlineOpen, setOutlineOpen] = useState(false)
   const [mode, setMode] = useState<ViewMode>('scroll')
+  const [dragOver, setDragOver] = useState(false)
+
+  const effectiveUrl = overrideUrl || pdfUrl
+  const effectiveTitle = overrideUrl ? (overrideTitle || '已覆盖') : title
 
   useEffect(() => {
     setPageNumber(1)
@@ -44,7 +53,7 @@ export function PdfPane({ title, pdfUrl }: Props) {
     setOutlineOpen(false)
     setNumPages(0)
     pageRefs.current = []
-  }, [pdfUrl])
+  }, [pdfUrl, overrideUrl])
 
   useEffect(() => {
     const el = containerRef.current
@@ -58,7 +67,7 @@ export function PdfPane({ title, pdfUrl }: Props) {
     return () => ro.disconnect()
   }, [])
 
-  const fileOpts = useMemo(() => (pdfUrl ? { url: pdfUrl } : null), [pdfUrl])
+  const fileOpts = useMemo(() => (effectiveUrl ? { url: effectiveUrl } : null), [effectiveUrl])
 
   async function mapOutlineItem(doc: any, item: any): Promise<OutlineItem> {
     let pageIndex: number | null = null
@@ -148,21 +157,73 @@ export function PdfPane({ title, pdfUrl }: Props) {
     )
   }
 
-  if (!pdfUrl) {
+  function handleDragOver(e: React.DragEvent) {
+    if (!onAcceptDrop) return
+    e.preventDefault()
+    setDragOver(true)
+  }
+  function handleDragLeave() {
+    setDragOver(false)
+  }
+  function handleDrop(e: React.DragEvent) {
+    if (!onAcceptDrop) return
+    e.preventDefault()
+    setDragOver(false)
+    try {
+      const raw = e.dataTransfer.getData('application/x-paperreader-artifact') || e.dataTransfer.getData('text/plain')
+      if (!raw) return
+      const payload = JSON.parse(raw)
+      if (!payload?.url) return
+      const kind = String(payload.kind || '')
+      const name = String(payload.name || 'preview')
+      const isPdf = kind.includes('pdf') || /\.pdf$/i.test(name) || /\.pdf(\?|$)/i.test(payload.url)
+      if (!isPdf) {
+        alert('仅支持拖入 PDF 类文件')
+        return
+      }
+      onAcceptDrop({ url: payload.url, name, kind })
+    } catch (err) {
+      console.error(err)
+    }
+  }
+
+  if (!effectiveUrl) {
     return (
-      <div className="pdf-pane">
+      <div
+        className={`pdf-pane ${dragOver ? 'drop-target' : ''}`}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
         <div className="pdf-toolbar">
           <div className="pdf-title">{title}</div>
         </div>
-        <div className="pdf-empty muted">暂无 PDF</div>
+        <div className="pdf-empty muted">{onAcceptDrop ? '暂无 PDF · 可将左侧产物拖入此处' : '暂无 PDF'}</div>
       </div>
     )
   }
 
   return (
-    <div className="pdf-pane">
+    <div
+      className={`pdf-pane ${dragOver ? 'drop-target' : ''}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <div className="pdf-toolbar">
-        <div className="pdf-title" title={title}>{title}</div>
+        <div className="pdf-title" title={effectiveTitle}>
+          {effectiveTitle}
+          {overrideUrl && onClearOverride && (
+            <button
+              className="icon-btn"
+              title="还原默认 PDF"
+              style={{ marginLeft: 6 }}
+              onClick={onClearOverride}
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
         <div className="pdf-controls">
           <button
             className="icon-btn"
@@ -215,7 +276,7 @@ export function PdfPane({ title, pdfUrl }: Props) {
           >
             <FileText size={16} />
           </button>
-          <a className="icon-btn" title="下载" href={pdfUrl} download>
+          <a className="icon-btn" title="下载" href={effectiveUrl} download>
             <Download size={16} />
           </a>
         </div>

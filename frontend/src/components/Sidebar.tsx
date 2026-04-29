@@ -1,14 +1,17 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   ChevronRight,
+  Eye,
   FileText,
   FolderOpen,
   PanelLeftClose,
+  Pencil,
   Plus,
   Star
 } from 'lucide-react'
 import type { ArtifactItem, DocumentSummary } from '../lib/api'
 import { makeDataUrl } from '../lib/api'
+import { ArtifactPreviewTip } from './ArtifactPreviewTip'
 
 type Tab = 'tasks' | 'favorites'
 
@@ -23,6 +26,9 @@ type Props = {
   onSelect: (documentId: string) => void
   onToggleFavorite: (documentId: string) => void
   onCollapse: () => void
+  onOpenInPane?: (artifact: ArtifactItem) => void
+  onEditTex?: (artifact: ArtifactItem) => void
+  onNewProject?: () => void
 }
 
 function formatSize(bytes: number): string {
@@ -47,12 +53,20 @@ export function Sidebar({
   onUpload,
   onSelect,
   onToggleFavorite,
-  onCollapse
+  onCollapse,
+  onOpenInPane,
+  onEditTex,
+  onNewProject,
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [tab, setTab] = useState<Tab>('tasks')
   const [showArtifacts, setShowArtifacts] = useState(true)
   const [showLogs, setShowLogs] = useState(false)
+  const [hoverPreview, setHoverPreview] = useState<{ artifact: ArtifactItem; rect: DOMRect } | null>(null)
+  const hoverTimerRef = useRef<number | null>(null)
+  useEffect(() => () => {
+    if (hoverTimerRef.current) window.clearTimeout(hoverTimerRef.current)
+  }, [])
 
   const visible =
     tab === 'favorites'
@@ -79,6 +93,15 @@ export function Sidebar({
         <Plus size={16} />
         {uploading ? '上传中…' : '新解析'}
       </button>
+      {onNewProject && (
+        <button
+          className="new-parse-btn secondary"
+          onClick={onNewProject}
+        >
+          <FolderOpen size={16} />
+          TeX 项目
+        </button>
+      )}
       <input
         ref={fileInputRef}
         type="file"
@@ -168,14 +191,68 @@ export function Sidebar({
                 ) : (
                   artifacts.map((item, idx) => {
                     const href = item.url ? makeDataUrl(item.url) : ''
+                    const isPdf = item.kind.includes('pdf') || /\.pdf$/i.test(item.name)
+                    const onMouseEnter = (e: React.MouseEvent<HTMLDivElement>) => {
+                      if (!item.url) return
+                      const rect = e.currentTarget.getBoundingClientRect()
+                      if (hoverTimerRef.current) window.clearTimeout(hoverTimerRef.current)
+                      hoverTimerRef.current = window.setTimeout(() => {
+                        setHoverPreview({ artifact: item, rect })
+                      }, 220)
+                    }
+                    const onMouseLeave = () => {
+                      if (hoverTimerRef.current) window.clearTimeout(hoverTimerRef.current)
+                      hoverTimerRef.current = null
+                      setHoverPreview(null)
+                    }
                     return (
-                      <div key={`${item.path}-${idx}`} className="artifact-item">
-                        <div className="artifact-name" title={item.name}>{item.name}</div>
+                      <div
+                        key={`${item.path}-${idx}`}
+                        className="artifact-item"
+                        draggable={!!item.url}
+                        onDragStart={(e) => {
+                          if (!item.url) return
+                          const payload = JSON.stringify({ url: makeDataUrl(item.url), name: item.name, kind: item.kind })
+                          e.dataTransfer.setData('application/x-paperreader-artifact', payload)
+                          e.dataTransfer.setData('text/plain', payload)
+                          e.dataTransfer.effectAllowed = 'copy'
+                        }}
+                        onMouseEnter={onMouseEnter}
+                        onMouseLeave={onMouseLeave}
+                        title={item.url ? '拖拽到 PDF 区域可预览，悬浮可见缩略图' : ''}
+                      >
+                        <div className="artifact-name">{item.name}</div>
                         <div className="artifact-meta">
                           <span className="muted small">{item.kind}</span>
-                          {href && (
-                            <a href={href} target="_blank" rel="noreferrer" className="small">打开</a>
-                          )}
+                          <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                            {isPdf && onOpenInPane && (
+                              <button
+                                className="icon-btn artifact-open"
+                                title="在阅读器中打开"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  onOpenInPane(item)
+                                }}
+                              >
+                                <Eye size={12} />
+                              </button>
+                            )}
+                            {item.name === 'translated.tex' && onEditTex && (
+                              <button
+                                className="icon-btn artifact-open"
+                                title="编辑并重新编译"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  onEditTex(item)
+                                }}
+                              >
+                                <Pencil size={12} />
+                              </button>
+                            )}
+                            {href && (
+                              <a href={href} target="_blank" rel="noreferrer" className="small">打开</a>
+                            )}
+                          </span>
                         </div>
                       </div>
                     )
@@ -203,6 +280,14 @@ export function Sidebar({
             )}
           </div>
         </>
+      )}
+      {hoverPreview && hoverPreview.artifact.url && (
+        <ArtifactPreviewTip
+          url={hoverPreview.artifact.url}
+          kind={hoverPreview.artifact.kind}
+          name={hoverPreview.artifact.name}
+          anchorRect={hoverPreview.rect}
+        />
       )}
     </aside>
   )

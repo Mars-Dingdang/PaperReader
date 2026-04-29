@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.models.store import ArtifactEntry, DOCUMENTS, DocumentRecord, ReferenceEntry
 from app.services.latex_service import (
     compile_tex_project,
+    compile_tex_project_with_fallback,
     copy_pdf_to_output,
     create_translated_tex,
     create_translated_tex_from_ir,
@@ -23,11 +24,13 @@ from app.services.mineru_service import (
     extract_text_from_pdf,  # noqa: F401  (kept for test monkeypatching compatibility)
     extract_text_from_pdf_text_layer,
 )
+from app.services.stage_tracker import init_stages, with_stage
 from app.services.translate_service import (
     translate_ir,
     translate_latex_document,
     translate_text,
 )
+from app.services.vision_check_service import run_vision_check_on_markdown
 
 _REFERENCE_SPLIT_PATTERN = re.compile(r"(?im)^\s*(references|bibliography)\s*$")
 _REFERENCE_ITEM_PATTERN = re.compile(r"^\s*(\[\d+\]|\d+\.|\d+\))\s+(.+)")
@@ -265,6 +268,7 @@ def process_document(
 ) -> DocumentRecord:
     record.status = "processing"
     record.logs.append("Processing started")
+    init_stages(record, vision_check_enabled=record.vision_check_enabled)
     try:
         record.size_bytes = record.source_path.stat().st_size
     except OSError:
@@ -275,145 +279,194 @@ def process_document(
     record.logs.append(f"Output dir: {output_dir}")
 
     try:
-        if record.source_type == "tex":
-            record.logs.append("Compiling source TEX")
-            original_pdf = compile_tex_project(record.source_path, output_dir)
-            original_out = output_dir / "original.pdf"
-            copy_pdf_to_output(original_pdf, original_out)
-            record.original_pdf_url = f"/data/outputs/{record.document_id}/original.pdf"
-            _append_artifact(record, "original.pdf", "original_pdf", original_out)
+        with with_stage(record, "upload"):
+            pass
 
-            tex_content = record.source_path.read_text(encoding="utf-8", errors="ignore")
-            record.extracted_text = tex_content
-            _append_artifact(record, record.source_path.name, "source_tex", record.source_path)
+        if record.source_type in ("tex", "tex_project"):
+            with with_stage(record, "compile_original"):
+                record.logs.append("Compiling source TEX")
+                original_pdf = compile_tex_project(record.source_path, output_dir)
+                original_out = output_dir / "original.pdf"
+                copy_pdf_to_output(original_pdf, original_out)
+                record.original_pdf_url = f"/data/outputs/{record.document_id}/original.pdf"
+                _append_artifact(record, "original.pdf", "original_pdf", original_out)
 
-            display_title, used_title_fallback = _derive_display_title(record.source_filename, tex_content)
-            if used_title_fallback:
-                record.logs.append("Title fallback applied from source filename")
+                tex_content = record.source_path.read_text(encoding="utf-8", errors="ignore")
+                record.extracted_text = tex_content
+                _append_artifact(record, record.source_path.name, "source_tex", record.source_path)
 
-            record.references = _extract_references_from_text(tex_content)
-            record.logs.append(f"References extracted: {len(record.references)}")
+                display_title, used_title_fallback = _derive_display_title(record.source_filename, tex_content)
+                if used_title_fallback:
+                    record.logs.append("Title fallback applied from source filename")
 
-            record.logs.append("Translating LaTeX source")
-            translated = translate_latex_document(
-                tex_content,
-                override_api_key=override_api_key,
-                override_base_url=override_base_url,
-                override_model=override_model,
-            )
-            if "\\begin{document}" not in translated or "\\end{document}" not in translated:
-                raise RuntimeError("LLM did not return a complete LaTeX document")
-            record.translated_text = translated
+                record.references = _extract_references_from_text(tex_content)
+                record.logs.append(f"References extracted: {len(record.references)}")
 
-            translated_tex = output_dir / "translated.tex"
-            translated_tex.write_text(translated, encoding="utf-8")
-            _append_artifact(record, "translated.tex", "translated_tex", translated_tex)
-            record.logs.append(f"Translated TEX: {translated_tex}")
+            with with_stage(record, "translate"):
+                record.logs.append("Translating LaTeX source")
+                translated = translate_latex_document(
+                    tex_content,
+                    override_api_key=override_api_key,
+                    override_base_url=override_base_url,
+                    override_model=override_model,
+                )
+                if "\\begin{document}" not in translated or "\\end{document}" not in translated:
+                    raise RuntimeError("LLM did not return a complete LaTeX document")
+                record.translated_text = translated
 
-            translated_pdf = compile_tex_project(translated_tex, output_dir)
-            translated_out = output_dir / "translated.pdf"
-            copy_pdf_to_output(translated_pdf, translated_out)
-            record.translated_pdf_url = f"/data/outputs/{record.document_id}/translated.pdf"
-            _append_artifact(record, "translated.pdf", "translated_pdf", translated_out)
+            if record.vision_check_enabled:
+                with with_stage(record, "vision_check"):
+                    try:
+                        record.translated_text = run_vision_check_on_markdown(
+                            record,
+                            pdf_path=output_dir / "original.pdf",
+                            text=record.translated_text,
+                            output_dir=output_dir,
+                        )
+                    except Exception as exc:  # never block the pipeline on vision check
+                        record.logs.append(f"Vision check skipped: {exc}")
+
+            with with_stage(record, "compile_translated"):
+                # Write translated tex next to the source so \\includegraphics resolves
+                translated_tex_in_project = record.source_path.parent / "__translated.tex"
+                translated_tex_in_project.write_text(record.translated_text, encoding="utf-8")
+                compile_result = compile_tex_project_with_fallback(translated_tex_in_project, output_dir)
+                translated_pdf = compile_result.pdf_path
+                if compile_result.warning:
+                    record.last_compile_warning = compile_result.warning
+                    record.logs.append(f"LaTeX warning: {compile_result.warning}")
+
+                translated_tex = output_dir / "translated.tex"
+                translated_tex.write_text(record.translated_text, encoding="utf-8")
+                record.translated_tex_path = translated_tex
+                _append_artifact(record, "translated.tex", "translated_tex", translated_tex)
+                record.logs.append(f"Translated TEX: {translated_tex}")
+
+                translated_out = output_dir / "translated.pdf"
+                copy_pdf_to_output(translated_pdf, translated_out)
+                record.translated_pdf_url = f"/data/outputs/{record.document_id}/translated.pdf"
+                _append_artifact(record, "translated.pdf", "translated_pdf", translated_out)
 
             record.status = "done"
             record.logs.append("Processing done")
             return record
         else:
-            record.logs.append("Handling source PDF")
-            original_out = output_dir / "original.pdf"
-            shutil.copyfile(record.source_path, original_out)
-            record.original_pdf_url = f"/data/outputs/{record.document_id}/original.pdf"
-            _append_artifact(record, "original.pdf", "original_pdf", original_out)
-            _append_artifact(record, record.source_path.name, "source_pdf", record.source_path)
+            with with_stage(record, "mineru"):
+                record.logs.append("Handling source PDF")
+                original_out = output_dir / "original.pdf"
+                shutil.copyfile(record.source_path, original_out)
+                record.original_pdf_url = f"/data/outputs/{record.document_id}/original.pdf"
+                _append_artifact(record, "original.pdf", "original_pdf", original_out)
+                _append_artifact(record, record.source_path.name, "source_pdf", record.source_path)
 
-            nougat_dir = output_dir / "mineru"
-            record.logs.append("Submitting PDF to MinerU")
-            mineru_result = extract_structured_from_pdf(
-                str(record.source_path), nougat_dir, log_sink=record.logs
-            )
-            extracted_text = mineru_result.markdown
-            device_or_mode = mineru_result.mode_label
-            nougat_files = mineru_result.extracted_files
-            fallback_text = extract_text_from_pdf_text_layer(str(record.source_path), max_pages=3)
-            record.extracted_text, repaired_up_to, missing_page_count, recovered_leading = _clean_nougat_text_with_metadata(
-                extracted_text,
-                leading_fallback_text=fallback_text,
-            )
-            if not record.extracted_text:
-                raise RuntimeError("MinerU output became empty after cleaning missing-page markers")
-            if missing_page_count:
-                record.logs.append(
-                    f"MinerU warning: {missing_page_count} missing-page marker(s) stripped; content may be incomplete"
+                nougat_dir = output_dir / "mineru"
+                record.logs.append("Submitting PDF to MinerU")
+                mineru_result = extract_structured_from_pdf(
+                    str(record.source_path), nougat_dir, log_sink=record.logs
                 )
-            if recovered_leading:
-                record.logs.append("Recovered leading PDF content from embedded text layer")
-            record.logs.append("MinerU output cleaned")
-            if repaired_up_to == 1:
-                record.logs.append("Heading repaired: inserted Problem 1")
-            elif repaired_up_to > 1:
-                record.logs.append(f"Heading repaired: inserted Problems 1-{repaired_up_to}")
-            record.logs.append(f"MinerU model: {device_or_mode}")
-            record.logs.append(f"MinerU output dir: {nougat_dir}")
-            for generated in nougat_files:
-                _append_artifact(record, generated.name, "mineru_output", generated)
 
-        display_title, used_title_fallback = _derive_display_title(record.source_filename, record.extracted_text)
-        if used_title_fallback:
-            record.logs.append("Title fallback applied from source filename")
+            with with_stage(record, "clean"):
+                extracted_text = mineru_result.markdown
+                device_or_mode = mineru_result.mode_label
+                nougat_files = mineru_result.extracted_files
+                fallback_text = extract_text_from_pdf_text_layer(str(record.source_path), max_pages=3)
+                record.extracted_text, repaired_up_to, missing_page_count, recovered_leading = _clean_nougat_text_with_metadata(
+                    extracted_text,
+                    leading_fallback_text=fallback_text,
+                )
+                if not record.extracted_text:
+                    raise RuntimeError("MinerU output became empty after cleaning missing-page markers")
+                if missing_page_count:
+                    record.logs.append(
+                        f"MinerU warning: {missing_page_count} missing-page marker(s) stripped; content may be incomplete"
+                    )
+                if recovered_leading:
+                    record.logs.append("Recovered leading PDF content from embedded text layer")
+                record.logs.append("MinerU output cleaned")
+                if repaired_up_to == 1:
+                    record.logs.append("Heading repaired: inserted Problem 1")
+                elif repaired_up_to > 1:
+                    record.logs.append(f"Heading repaired: inserted Problems 1-{repaired_up_to}")
+                record.logs.append(f"MinerU model: {device_or_mode}")
+                record.logs.append(f"MinerU output dir: {nougat_dir}")
+                for generated in nougat_files:
+                    _append_artifact(record, generated.name, "mineru_output", generated)
 
-        record.references = _extract_references_from_text(record.extracted_text)
-        record.logs.append(f"References extracted: {len(record.references)}")
+                display_title, used_title_fallback = _derive_display_title(record.source_filename, record.extracted_text)
+                if used_title_fallback:
+                    record.logs.append("Title fallback applied from source filename")
 
-        ir_blocks = None
-        if mineru_result.content_blocks is not None:
-            ir_blocks = blocks_to_ir(mineru_result.content_blocks)
-            if not ir_blocks:
+                record.references = _extract_references_from_text(record.extracted_text)
+                record.logs.append(f"References extracted: {len(record.references)}")
+
+            if record.vision_check_enabled:
+                with with_stage(record, "vision_check"):
+                    try:
+                        record.extracted_text = run_vision_check_on_markdown(
+                            record,
+                            pdf_path=output_dir / "original.pdf",
+                            text=record.extracted_text,
+                            output_dir=output_dir,
+                        )
+                    except Exception as exc:
+                        record.logs.append(f"Vision check skipped: {exc}")
+
+            with with_stage(record, "translate"):
                 ir_blocks = None
-            else:
-                record.logs.append(
-                    f"Parsed {len(ir_blocks)} structured blocks from MinerU"
-                )
+                if mineru_result.content_blocks is not None:
+                    ir_blocks = blocks_to_ir(mineru_result.content_blocks)
+                    if not ir_blocks:
+                        ir_blocks = None
+                    else:
+                        record.logs.append(
+                            f"Parsed {len(ir_blocks)} structured blocks from MinerU"
+                        )
 
-        translated_tex = output_dir / "translated.tex"
+                translated_tex = output_dir / "translated.tex"
 
-        if ir_blocks is not None:
-            record.logs.append("Translating structured blocks")
-            translate_ir(
-                ir_blocks,
-                override_api_key=override_api_key,
-                override_base_url=override_base_url,
-                override_model=override_model,
-            )
-            record.translated_text = _ir_to_translated_markdown(ir_blocks)
-            create_translated_tex_from_ir(
-                ir_blocks,
-                translated_tex,
-                images_src_dir=mineru_result.images_dir,
-                title=display_title,
-            )
-            if mineru_result.images_dir and mineru_result.images_dir.is_dir():
-                copied = sum(1 for _ in mineru_result.images_dir.iterdir())
-                record.logs.append(f"Copied {copied} image(s) into translated project")
-        else:
-            record.logs.append("Falling back to markdown rendering")
-            translated = translate_text(
-                record.extracted_text,
-                override_api_key=override_api_key,
-                override_base_url=override_base_url,
-                override_model=override_model,
-            )
-            record.translated_text = translated
-            create_translated_tex(translated, translated_tex, title=display_title)
+                if ir_blocks is not None:
+                    record.logs.append("Translating structured blocks")
+                    translate_ir(
+                        ir_blocks,
+                        override_api_key=override_api_key,
+                        override_base_url=override_base_url,
+                        override_model=override_model,
+                    )
+                    record.translated_text = _ir_to_translated_markdown(ir_blocks)
+                    create_translated_tex_from_ir(
+                        ir_blocks,
+                        translated_tex,
+                        images_src_dir=mineru_result.images_dir,
+                        title=display_title,
+                    )
+                    if mineru_result.images_dir and mineru_result.images_dir.is_dir():
+                        copied = sum(1 for _ in mineru_result.images_dir.iterdir())
+                        record.logs.append(f"Copied {copied} image(s) into translated project")
+                else:
+                    record.logs.append("Falling back to markdown rendering")
+                    translated = translate_text(
+                        record.extracted_text,
+                        override_api_key=override_api_key,
+                        override_base_url=override_base_url,
+                        override_model=override_model,
+                    )
+                    record.translated_text = translated
+                    create_translated_tex(translated, translated_tex, title=display_title)
 
-        _append_artifact(record, "translated.tex", "translated_tex", translated_tex)
-        record.logs.append(f"Translated TEX: {translated_tex}")
+                _append_artifact(record, "translated.tex", "translated_tex", translated_tex)
+                record.logs.append(f"Translated TEX: {translated_tex}")
 
-        translated_pdf = compile_tex_project(translated_tex, output_dir)
-        translated_out = output_dir / "translated.pdf"
-        copy_pdf_to_output(translated_pdf, translated_out)
-        record.translated_pdf_url = f"/data/outputs/{record.document_id}/translated.pdf"
-        _append_artifact(record, "translated.pdf", "translated_pdf", translated_out)
+            with with_stage(record, "latex_build"):
+                compile_result = compile_tex_project_with_fallback(translated_tex, output_dir)
+                translated_pdf = compile_result.pdf_path
+                if compile_result.warning:
+                    record.last_compile_warning = compile_result.warning
+                    record.logs.append(f"LaTeX warning: {compile_result.warning}")
+                record.translated_tex_path = translated_tex
+                translated_out = output_dir / "translated.pdf"
+                copy_pdf_to_output(translated_pdf, translated_out)
+                record.translated_pdf_url = f"/data/outputs/{record.document_id}/translated.pdf"
+                _append_artifact(record, "translated.pdf", "translated_pdf", translated_out)
 
         record.status = "done"
         record.logs.append("Processing done")

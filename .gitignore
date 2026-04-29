@@ -1,7 +1,9 @@
 .claude/
 .pytest_cache/
 **/__pycache__/
+**/*.pyc
 .vscode/
+data/
 data/outputs/
 data/uploads/
 .env
@@ -10,3 +12,6 @@ homework7.pdf
 homework7.tex
 plan.md
 backend/data/
+
+0413problem.pdf
+testexamples/

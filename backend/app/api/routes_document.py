@@ -1,6 +1,13 @@
 from fastapi import APIRouter, HTTPException
 
-from app.models.schemas import ArtifactItem, DocumentStatusResponse, DocumentSummary, ReferenceItem
+from app.models.schemas import (
+    ArtifactItem,
+    DocumentStatusResponse,
+    DocumentSummary,
+    ReferenceItem,
+    ReviewProposalItem,
+    StageItem,
+)
 from app.models.store import DOCUMENTS
 
 
@@ -44,4 +51,31 @@ def get_document(document_id: str) -> DocumentStatusResponse:
         ],
         references=[ReferenceItem(index=item.index, text=item.text) for item in record.references],
         logs=record.logs,
+        progress=record.progress,
+        current_stage=record.current_stage,
+        current_stage_label=record.current_stage_label,
+        eta_seconds=record.eta_seconds,
+        stages=[
+            StageItem(
+                key=s.key,
+                label=s.label,
+                weight=s.weight,
+                status=s.status,
+                started_at=s.started_at,
+                ended_at=s.ended_at,
+                duration_ms=s.duration_ms,
+            )
+            for s in record.stages
+        ],
+        pending_reviews=[
+            ReviewProposalItem(
+                page_index=p.page_index,
+                issues=p.issues,
+                original_md=p.original_md,
+                proposed_md=p.proposed_md,
+                image_url=p.image_url,
+            )
+            for p in record.pending_reviews
+        ],
+        last_compile_warning=record.last_compile_warning,
     )

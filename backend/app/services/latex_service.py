@@ -1,10 +1,13 @@
+import logging
 import re
 import shutil
 import subprocess
 from pathlib import Path
 
 from app.core.config import settings
+from app.services.latex_sanitizer import sanitize_latex_body
 from app.services.mineru_layout import (
+
     Block,
     DisplayMath,
     Image,
@@ -14,6 +17,8 @@ from app.services.mineru_layout import (
     TextRun,
     Title,
 )
+
+logger = logging.getLogger(__name__)
 
 
 _HEADING_PATTERN = re.compile(r"^(#{2,4})\s+(.+)$", re.MULTILINE)
@@ -79,37 +84,78 @@ def _markdown_to_latex_fallback(text: str) -> str:
     return "\n".join(result)
 
 
-def compile_tex_project(tex_path: Path, output_dir: Path) -> Path:
-    tex_path = tex_path.resolve()
-    output_dir = output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+class LatexCompileResult:
+    """Outcome of a (possibly fallback) LaTeX compilation.
+
+    `warning` is set when the strict pass failed but the lenient `-f` pass
+    still produced a PDF; it contains the original strict-mode error detail
+    so the UI can surface it without aborting the pipeline.
+    """
+
+    def __init__(self, pdf_path: Path, warning: str | None = None) -> None:
+        self.pdf_path = pdf_path
+        self.warning = warning
+
+
+def _run_latexmk(tex_path: Path, output_dir: Path, *, force: bool) -> subprocess.CompletedProcess[str]:
     command = [
         settings.latexmk_path,
         "-xelatex",
         "-interaction=nonstopmode",
-        "-halt-on-error",
         "-output-directory=" + str(output_dir),
-        tex_path.name,
     ]
-    try:
-        subprocess.run(
-            command,
-            check=True,
-            cwd=str(tex_path.parent),
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        log_path = output_dir / f"{tex_path.stem}.log"
-        detail = (exc.stderr or exc.stdout or "").strip()
-        if len(detail) > 800:
-            detail = detail[-800:]
-        raise RuntimeError(f"LaTeX compile failed. log={log_path}. details={detail}") from exc
+    if force:
+        command.append("-f")
+    else:
+        command.append("-halt-on-error")
+    command.append(tex_path.name)
+    return subprocess.run(
+        command,
+        check=False,
+        cwd=str(tex_path.parent),
+        capture_output=True,
+        text=True,
+    )
 
+
+def compile_tex_project_with_fallback(tex_path: Path, output_dir: Path) -> LatexCompileResult:
+    """Compile with strict mode first; if it fails, retry with `-f` so a PDF
+    is still produced when possible. The strict-mode error is returned as a
+    warning rather than raised, so callers can record it without aborting.
+    """
+    tex_path = tex_path.resolve()
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
     expected_pdf = output_dir / (tex_path.stem + ".pdf")
-    if not expected_pdf.exists():
-        raise FileNotFoundError(f"Compiled PDF not found: {expected_pdf}")
-    return expected_pdf
+
+    strict = _run_latexmk(tex_path, output_dir, force=False)
+    if strict.returncode == 0 and expected_pdf.exists():
+        return LatexCompileResult(expected_pdf)
+
+    strict_detail = (strict.stderr or strict.stdout or "").strip()
+    if len(strict_detail) > 800:
+        strict_detail = strict_detail[-800:]
+    log_path = output_dir / f"{tex_path.stem}.log"
+    logger.warning("latexmk strict pass failed (rc=%s); retrying with -f", strict.returncode)
+
+    lenient = _run_latexmk(tex_path, output_dir, force=True)
+    if expected_pdf.exists():
+        warning = (
+            f"LaTeX strict compile failed but a PDF was produced via -f. "
+            f"log={log_path}. strict_details={strict_detail}"
+        )
+        logger.warning(warning)
+        return LatexCompileResult(expected_pdf, warning=warning)
+
+    detail = (lenient.stderr or lenient.stdout or strict_detail or "").strip()
+    if len(detail) > 800:
+        detail = detail[-800:]
+    raise RuntimeError(f"LaTeX compile failed. log={log_path}. details={detail}")
+
+
+def compile_tex_project(tex_path: Path, output_dir: Path) -> Path:
+    """Backwards-compatible wrapper that returns just the PDF path."""
+    return compile_tex_project_with_fallback(tex_path, output_dir).pdf_path
 
 
 _LATEX_TEXT_ESCAPES = (
@@ -136,6 +182,7 @@ def _escape_latex_text(text: str) -> str:
 def create_translated_tex(source_text: str, out_tex_path: Path, title: str | None = None) -> None:
     out_tex_path.parent.mkdir(parents=True, exist_ok=True)
     body = _markdown_to_latex_fallback(source_text)
+    body = sanitize_latex_body(body)
     title_block = ""
     if title and title.strip():
         title_text = _escape_latex_text(title.strip())
@@ -288,6 +335,7 @@ def create_translated_tex_from_ir(
     """Write `translated.tex` from an IR list and copy `images/` next to it."""
     out_tex_path.parent.mkdir(parents=True, exist_ok=True)
     tex = render_ir_to_tex(ir, title=title)
+    tex = sanitize_latex_body(tex)
     out_tex_path.write_text(tex, encoding="utf-8")
 
     if images_src_dir and images_src_dir.is_dir():

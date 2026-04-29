@@ -40,6 +40,20 @@ class Settings(BaseSettings):
 
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
 
+    # Vision-model adversarial check (Phase D)
+    vision_model: str = Field(default="Qwen3.5-397B-A17B", alias="VISION_MODEL")
+    vision_check_enabled: bool = Field(default=True, alias="VISION_CHECK_ENABLED")
+    vision_check_mode: str = Field(default="auto", alias="VISION_CHECK_MODE")  # auto | manual
+    vision_check_max_pages: int = Field(default=8, alias="VISION_CHECK_MAX_PAGES")
+
+    # TeX project upload limits (Phase B)
+    project_max_file_mb: int = Field(default=20, alias="PROJECT_MAX_FILE_MB")
+    project_max_total_mb: int = Field(default=200, alias="PROJECT_MAX_TOTAL_MB")
+
+    # Translation concurrency (chunked LLM calls)
+    translate_concurrency: int = Field(default=4, alias="TRANSLATE_CONCURRENCY")
+    translate_max_retries: int = Field(default=5, alias="TRANSLATE_MAX_RETRIES")
+
     cors_origins_raw: str = Field(default="http://localhost:5173", alias="CORS_ORIGINS")
 
     @property

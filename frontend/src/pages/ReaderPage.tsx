@@ -3,8 +3,12 @@ import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import { MessageSquareText, PanelLeftOpen, ScrollText } from 'lucide-react'
 import { ChatPanel } from '../components/ChatPanel'
 import { PdfPane } from '../components/PdfPane'
+import { ProgressBar } from '../components/ProgressBar'
+import { ProjectDrawer } from '../components/ProjectDrawer'
+import { ReviewModal } from '../components/ReviewModal'
 import { Sidebar } from '../components/Sidebar'
-import type { DocumentStatus, DocumentSummary } from '../lib/api'
+import { TexEditorModal } from '../components/TexEditorModal'
+import type { ArtifactItem, DocumentStatus, DocumentSummary } from '../lib/api'
 import {
   getDocumentStatus,
   listDocuments,
@@ -14,6 +18,9 @@ import {
 } from '../lib/api'
 
 const FAV_LS_KEY = 'paperreader.favorites'
+const VISION_LS_KEY = 'paperreader.vision'
+
+type OverridePdf = { url: string; name: string } | null
 
 export function ReaderPage() {
   const [summaries, setSummaries] = useState<DocumentSummary[]>([])
@@ -23,14 +30,28 @@ export function ReaderPage() {
   const [favorites, setFavorites] = useState<string[]>([])
   const [showSidebar, setShowSidebar] = useState(true)
   const [showChat, setShowChat] = useState(true)
+  const [overrideLeft, setOverrideLeft] = useState<OverridePdf>(null)
+  const [overrideRight, setOverrideRight] = useState<OverridePdf>(null)
+  const [projectOpen, setProjectOpen] = useState(false)
+  const [editTexOpen, setEditTexOpen] = useState(false)
+  const [visionEnabled, setVisionEnabled] = useState(true)
+  const [visionMode, setVisionMode] = useState<'auto' | 'manual'>('auto')
 
   const pollTimerRef = useRef<number | null>(null)
 
-  // Load favorites
+  // Load preferences
   useEffect(() => {
     try {
       const raw = localStorage.getItem(FAV_LS_KEY)
       if (raw) setFavorites(JSON.parse(raw))
+    } catch {}
+    try {
+      const raw = localStorage.getItem(VISION_LS_KEY)
+      if (raw) {
+        const v = JSON.parse(raw)
+        setVisionEnabled(!!v.enabled)
+        setVisionMode(v.mode === 'manual' ? 'manual' : 'auto')
+      }
     } catch {}
   }, [])
   useEffect(() => {
@@ -38,6 +59,11 @@ export function ReaderPage() {
       localStorage.setItem(FAV_LS_KEY, JSON.stringify(favorites))
     } catch {}
   }, [favorites])
+  useEffect(() => {
+    try {
+      localStorage.setItem(VISION_LS_KEY, JSON.stringify({ enabled: visionEnabled, mode: visionMode }))
+    } catch {}
+  }, [visionEnabled, visionMode])
 
   const refreshSummaries = useCallback(async () => {
     try {
@@ -73,7 +99,6 @@ export function ReaderPage() {
       try {
         const data = await getDocumentStatus(activeId)
         setDocCache((c) => ({ ...c, [activeId]: data }))
-        // also update summary for status
         setSummaries((prev) =>
           prev.map((s) =>
             s.document_id === activeId
@@ -106,10 +131,16 @@ export function ReaderPage() {
   const originalPdfUrl = activeDoc?.original_pdf_url ? makeDataUrl(activeDoc.original_pdf_url) : undefined
   const translatedPdfUrl = activeDoc?.translated_pdf_url ? makeDataUrl(activeDoc.translated_pdf_url) : undefined
 
+  // Reset overrides when switching active doc
+  useEffect(() => {
+    setOverrideLeft(null)
+    setOverrideRight(null)
+  }, [activeId])
+
   const handleUpload = useCallback(async (file: File) => {
     setUploading(true)
     try {
-      const result = await uploadFile(file)
+      const result = await uploadFile(file, { visionCheckEnabled: visionEnabled, visionCheckMode: visionMode })
       setActiveId(result.document_id)
       await refreshSummaries()
     } catch (e: any) {
@@ -117,6 +148,11 @@ export function ReaderPage() {
     } finally {
       setUploading(false)
     }
+  }, [refreshSummaries, visionEnabled, visionMode])
+
+  const handleProjectBuilt = useCallback(async (documentId: string) => {
+    setActiveId(documentId)
+    await refreshSummaries()
   }, [refreshSummaries])
 
   const handleToggleFavorite = useCallback((docId: string) => {
@@ -125,9 +161,16 @@ export function ReaderPage() {
     )
   }, [])
 
+  const handleOpenInPane = useCallback((artifact: ArtifactItem) => {
+    if (!artifact.url) return
+    setOverrideRight({ url: makeDataUrl(artifact.url), name: artifact.name })
+  }, [])
+
   const chatRefs = activeDoc?.references ?? []
   const artifacts = activeDoc?.artifacts ?? []
   const logs = activeDoc?.logs ?? []
+  const stages = activeDoc?.stages ?? []
+  const pendingReviews = activeDoc?.pending_reviews ?? []
 
   const sourceTitle = useMemo(() => {
     if (!activeDoc) return '原始 PDF'
@@ -148,6 +191,9 @@ export function ReaderPage() {
           onSelect={setActiveId}
           onToggleFavorite={handleToggleFavorite}
           onCollapse={() => setShowSidebar(false)}
+          onOpenInPane={handleOpenInPane}
+          onEditTex={() => setEditTexOpen(true)}
+          onNewProject={() => setProjectOpen(true)}
         />
       )}
 
@@ -164,6 +210,18 @@ export function ReaderPage() {
         >
           <MessageSquareText size={18} />
         </button>
+        <button
+          className={`rail-btn ${visionEnabled ? 'active' : ''}`}
+          title={`视觉校验：${visionEnabled ? `开 (${visionMode === 'manual' ? '人工' : '自动'})` : '关'} · 点击切换`}
+          onClick={() => {
+            // 3-state cycle: off -> auto -> manual -> off
+            if (!visionEnabled) { setVisionEnabled(true); setVisionMode('auto') }
+            else if (visionMode === 'auto') setVisionMode('manual')
+            else setVisionEnabled(false)
+          }}
+        >
+          {visionEnabled ? (visionMode === 'manual' ? '人' : '自') : '×'}
+        </button>
         <div className="rail-spacer" />
         <button
           className="rail-btn"
@@ -175,6 +233,15 @@ export function ReaderPage() {
       </div>
 
       <main className="workspace">
+        {activeDoc && (
+          <ProgressBar
+            status={activeDoc.status}
+            progress={activeDoc.progress}
+            currentStageLabel={activeDoc.current_stage_label}
+            etaSeconds={activeDoc.eta_seconds}
+            stages={stages}
+          />
+        )}
         {!activeId ? (
           <div className="workspace-empty">
             <h2>欢迎使用 PaperReader</h2>
@@ -183,11 +250,25 @@ export function ReaderPage() {
         ) : (
           <PanelGroup direction="horizontal" autoSaveId="paperreader.layout">
             <Panel defaultSize={showChat ? 35 : 50} minSize={20}>
-              <PdfPane title={sourceTitle} pdfUrl={originalPdfUrl} />
+              <PdfPane
+                title={sourceTitle}
+                pdfUrl={originalPdfUrl}
+                overrideUrl={overrideLeft?.url}
+                overrideTitle={overrideLeft ? `产物 · ${overrideLeft.name}` : undefined}
+                onAcceptDrop={({ url, name }) => setOverrideLeft({ url, name })}
+                onClearOverride={() => setOverrideLeft(null)}
+              />
             </Panel>
             <PanelResizeHandle className="resize-handle" />
             <Panel defaultSize={showChat ? 35 : 50} minSize={20}>
-              <PdfPane title="译文 PDF" pdfUrl={translatedPdfUrl} />
+              <PdfPane
+                title="译文 PDF"
+                pdfUrl={translatedPdfUrl}
+                overrideUrl={overrideRight?.url}
+                overrideTitle={overrideRight ? `产物 · ${overrideRight.name}` : undefined}
+                onAcceptDrop={({ url, name }) => setOverrideRight({ url, name })}
+                onClearOverride={() => setOverrideRight(null)}
+              />
             </Panel>
             {showChat && (
               <>
@@ -213,6 +294,33 @@ export function ReaderPage() {
           </PanelGroup>
         )}
       </main>
+
+      <ProjectDrawer
+        open={projectOpen}
+        onClose={() => setProjectOpen(false)}
+        onBuilt={(id) => void handleProjectBuilt(id)}
+        visionCheckEnabled={visionEnabled}
+        visionCheckMode={visionMode}
+      />
+      {activeId && activeDoc?.status === 'awaiting_review' && pendingReviews.length > 0 && (
+        <ReviewModal
+          documentId={activeId}
+          proposals={pendingReviews}
+          onResolved={() => {
+            // trigger an immediate refresh
+            void getDocumentStatus(activeId).then((d) => setDocCache((c) => ({ ...c, [activeId]: d })))
+          }}
+        />
+      )}
+      {activeId && editTexOpen && (
+        <TexEditorModal
+          documentId={activeId}
+          onClose={() => setEditTexOpen(false)}
+          onCompiled={() => {
+            void getDocumentStatus(activeId).then((d) => setDocCache((c) => ({ ...c, [activeId]: d })))
+          }}
+        />
+      )}
     </div>
   )
 }

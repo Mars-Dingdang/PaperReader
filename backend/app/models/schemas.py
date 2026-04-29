@@ -18,6 +18,24 @@ class ReferenceItem(BaseModel):
     text: str
 
 
+class StageItem(BaseModel):
+    key: str
+    label: str
+    weight: float
+    status: str
+    started_at: float | None = None
+    ended_at: float | None = None
+    duration_ms: int | None = None
+
+
+class ReviewProposalItem(BaseModel):
+    page_index: int
+    issues: list[str] = []
+    original_md: str = ""
+    proposed_md: str = ""
+    image_url: str | None = None
+
+
 class DocumentStatusResponse(BaseModel):
     document_id: str
     status: str
@@ -28,6 +46,13 @@ class DocumentStatusResponse(BaseModel):
     artifacts: list[ArtifactItem] = []
     references: list[ReferenceItem] = []
     logs: list[str] = []
+    progress: int = 0
+    current_stage: str | None = None
+    current_stage_label: str | None = None
+    eta_seconds: int | None = None
+    stages: list[StageItem] = []
+    pending_reviews: list[ReviewProposalItem] = []
+    last_compile_warning: str | None = None
 
 
 class ChatRequest(BaseModel):

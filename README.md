@@ -1,10 +1,20 @@
 # Paper Reader MVP
 
+![](./images/demo1.png)
+
 A full-stack MVP for bilingual paper reading:
-- Upload `.pdf` or `.tex`
+- Upload `.pdf`, single `.tex`, or a multi-file TeX project (Phase B)
 - Parse PDF via the [MinerU](https://mineru.net/apiManage/docs) cloud API (精准解析, Bearer token)
+- Concurrent LLM translation (Phase 优化) with placeholder protection, jittered retry and `Retry-After` honoring
+- Vision-model adversarial check on each page (Qwen-class multimodal model, auto / manual review modes — Phase D)
+- Three-layer LaTeX-failure prevention:
+  1. **Prose sanitizer** rewrites raw Greek / math unicode (`ε`, `≤`, `→`, `Σ`…) into proper inline math
+  2. **Force-fallback compile**: strict pass first, then `latexmk -f` so a PDF is still produced; surfaces `last_compile_warning`
+  3. **Manual editor**: pencil button on the `translated.tex` artifact opens an in-browser editor that saves and recompiles
 - Left/center/right reading workspace with toggleable Upload / Reader / Chat regions
 - Show original and translated PDF side-by-side
+- Progress bar with stage breakdown and ETA (Phase A)
+- Artifact panel with scrolling, hover thumbnail preview, and drag-into-PDF-pane (Phase C)
 - Chat with paper context via OpenAI-compatible API
 - Premium interactions: generated-file list, reference preview, and template prompts (Highlight/Baseline/Limitations)
 
@@ -101,6 +111,13 @@ cp .env.example .env
 - `OPENAI_MODEL`
 - `MINERU_API_KEY` (apply at https://mineru.net/apiManage/docs)
 
+### Optional / tuning variables
+
+- `TRANSLATE_CONCURRENCY` (default `4`) — number of parallel chunk translations.
+- `TRANSLATE_MAX_RETRIES` (default `5`) — retry budget per LLM call; uses jittered exponential backoff and respects `Retry-After`.
+- `OPENAI_VISION_MODEL` / `OPENAI_VISION_BASE_URL` / `OPENAI_VISION_API_KEY` — override the multimodal model used by the Phase D vision check (defaults reuse the main `OPENAI_*` vars).
+- `LATEXMK_PATH` — absolute path to `latexmk` if not on `PATH`.
+
 ### MinerU PDF parsing
 
 PDF parsing now goes through the MinerU 精准解析 API (no local OCR / GPU /
@@ -164,10 +181,12 @@ make worker
 
 ```bash
 # 后端
-uvicorn app.main:app --reload --app-dir backend
+cd backend
+uvicorn app.main:app --reload
 
 # 前端
-npm --prefix frontend run dev
+cd frontend
+npm run dev
 
 # Worker（可选）
 celery -A app.workers.tasks worker -l info --workdir backend
@@ -205,10 +224,21 @@ Services:
 ## API Endpoints
 
 - `GET /health`
-- `POST /api/upload` (multipart file: `.pdf` or `.tex`)
+- `POST /api/upload` (multipart file: `.pdf` or `.tex`; form fields `vision_check_enabled`, `vision_check_mode`)
 - `GET /api/documents` — 列出所有文档摘要（用于侧栏文件切换）
 - `GET /api/document/{document_id}`
 - `POST /api/chat`
+- **Project (Phase B)**
+  - `POST /api/project` — 创建 TeX 项目
+  - `GET /api/project/{project_id}` — 查看文件与主文件候选
+  - `POST /api/project/{project_id}/files` — 多次上传项目文件
+  - `POST /api/project/{project_id}/delete-files`
+  - `POST /api/project/{project_id}/build` — 选定主 `.tex` 后启动编译流水线
+- **Vision review (Phase D)**
+  - `POST /api/document/{document_id}/review` — 接受 / 拒绝视觉模型提出的修订
+- **Manual TeX recompile**
+  - `GET /api/document/{document_id}/tex` — 读取当前 `translated.tex`
+  - `POST /api/document/{document_id}/tex` — 保存修改后重新编译（源文件先经 `latex_sanitizer` 清洗，并启用 strict→`-f` 降级编译）
 
 ### `GET /api/document/{document_id}` response highlights
 
@@ -216,6 +246,9 @@ Now includes:
 - `source_filename`
 - `artifacts` (uploaded and generated files)
 - `references` (extracted bibliography entries for preview)
+- `progress`, `current_stage`, `current_stage_label`, `eta_seconds`, `stages` (Phase A)
+- `pending_reviews` — vision-model proposals awaiting human decision in `manual` mode (Phase D)
+- `last_compile_warning` — set when the strict LaTeX pass failed but the lenient `-f` pass still produced a PDF; the UI surfaces this so users can open the manual TeX editor for cleanup
 - plus existing `status`, `original_pdf_url`, `translated_pdf_url`, `logs`
 
 ### Chat payload
@@ -248,7 +281,8 @@ Now includes:
 
 ## Current MVP Boundaries
 
-- Upload processing is still synchronous in request path (no background job handoff yet).
-- Document state is in-memory and resets when backend restarts.
+- Upload processing is still synchronous in request path (no background job handoff yet); translation chunks within a document are run concurrently via a thread pool.
+- Document and project state is in-memory and resets when backend restarts.
 - Reference extraction is heuristic (section/line-pattern based), not a full citation parser.
-- Frontend now supports panel toggles and premium shortcuts, but no account-tier gating yet.
+- Frontend supports panel toggles, drag-and-drop artifact preview, vision-check manual review and an in-browser `translated.tex` editor, but no account-tier gating yet.
+- LaTeX compile uses a strict pass first, then a lenient `-f` pass so the pipeline rarely ends in hard failure; warnings are surfaced via `last_compile_warning` and the manual editor lets users patch the source and recompile in-place.

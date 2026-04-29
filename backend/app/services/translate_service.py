@@ -1,11 +1,52 @@
+import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, TypeVar
 
+from app.core.config import settings
+from app.services.latex_sanitizer import sanitize_latex_body
 from app.services.llm_client import llm_client
 from app.services.mineru_layout import (
     Block,
     apply_translations,
     collect_translatable_strings,
 )
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+
+def _run_concurrent(
+    items: list[T],
+    worker: Callable[[int, T], str],
+    fallback: Callable[[int, T, Exception], str],
+    max_workers: int | None = None,
+) -> list[str]:
+    """Run `worker(idx, item)` for each item concurrently; on per-item exception
+    after all retries are exhausted by the worker, call `fallback(idx, item, exc)`
+    so the pipeline never fails wholesale due to a single chunk being rejected.
+    Results are returned in the original order.
+    """
+    if not items:
+        return []
+    workers = max(1, max_workers or settings.translate_concurrency)
+    workers = min(workers, len(items))
+    results: list[str] = [""] * len(items)
+
+    def _safe(idx: int, item: T) -> tuple[int, str]:
+        try:
+            return idx, worker(idx, item)
+        except Exception as exc:  # noqa: BLE001 - want to capture all to fallback
+            logger.warning("Chunk %d failed after retries, using fallback: %s", idx, exc)
+            return idx, fallback(idx, item, exc)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_safe, i, item) for i, item in enumerate(items)]
+        for fut in futures:
+            idx, value = fut.result()
+            results[idx] = value
+    return results
 
 
 _PLACEHOLDER_PATTERN = re.compile(r"(\\$[^$]+\\$|\\\\\[[^\]]+\\\\\]|\\\\\([^\)]+\\\\\)|\\\\cite\{[^}]+\}|\\\\ref\{[^}]+\}|https?://\\S+)")
@@ -104,16 +145,17 @@ def translate_text(
         "Keep all placeholder tokens like <PH_0> unchanged, and do not alter LaTeX commands or citation references represented by placeholders."
     )
 
-    translated_chunks: list[str] = []
-    for chunk in chunks:
-        translated_chunk = llm_client.chat(
+    translated_chunks = _run_concurrent(
+        chunks,
+        worker=lambda _i, chunk: llm_client.chat(
             message=chunk,
             system_prompt=system_prompt,
             override_api_key=override_api_key,
             override_base_url=override_base_url,
             override_model=override_model,
-        )
-        translated_chunks.append(translated_chunk.strip())
+        ).strip(),
+        fallback=lambda _i, chunk, _exc: chunk,
+    )
 
     translated = "\n\n".join(part for part in translated_chunks if part)
     return restore_placeholders(translated, mapping)
@@ -155,16 +197,19 @@ def _translate_latex_body(
         "Do not add document preamble commands or Markdown fences. Output only LaTeX body content."
     )
 
-    translated_chunks: list[str] = []
-    for chunk in chunks:
-        translated_chunk = llm_client.chat(
-            message=chunk,
-            system_prompt=system_prompt,
-            override_api_key=override_api_key,
-            override_base_url=override_base_url,
-            override_model=override_model,
-        )
-        translated_chunks.append(_strip_code_fences(translated_chunk))
+    translated_chunks = _run_concurrent(
+        chunks,
+        worker=lambda _i, chunk: _strip_code_fences(
+            llm_client.chat(
+                message=chunk,
+                system_prompt=system_prompt,
+                override_api_key=override_api_key,
+                override_base_url=override_base_url,
+                override_model=override_model,
+            )
+        ),
+        fallback=lambda _i, chunk, _exc: chunk,
+    )
 
     translated = "\n\n".join(part for part in translated_chunks if part)
     return restore_placeholders(translated, mapping)
@@ -192,7 +237,8 @@ def translate_latex_document(
     except ValueError:
         translated_body = translated
 
-    return f"{prefix}\n{translated_body.strip()}\n{suffix}"
+    translated_body = sanitize_latex_body(translated_body.strip())
+    return f"{prefix}\n{translated_body}\n{suffix}"
 
 
 # ---------------------------------------------------------------------------
@@ -306,8 +352,10 @@ def translate_ir(
         return
 
     translations: list[str] = [""] * len(segments)
-    for batch in _batch_segments(segments, _IR_BATCH_MAX_CHARS):
-        batch_segments = [segments[i] for i in batch]
+    batches = _batch_segments(segments, _IR_BATCH_MAX_CHARS)
+
+    def _do_batch(_i: int, batch: list[int]) -> str:
+        batch_segments = [segments[j] for j in batch]
         batch_translations = _translate_segment_batch(
             batch_segments,
             override_api_key=override_api_key,
@@ -316,5 +364,15 @@ def translate_ir(
         )
         for slot, value in zip(batch, batch_translations):
             translations[slot] = value or segments[slot]
+        return ""
+
+    def _fallback(_i: int, batch: list[int], _exc: Exception) -> str:
+        # Keep originals for any segment in this failed batch so the pipeline continues.
+        for slot in batch:
+            if not translations[slot]:
+                translations[slot] = segments[slot]
+        return ""
+
+    _run_concurrent(batches, worker=_do_batch, fallback=_fallback)
 
     apply_translations(ir, translations)
