@@ -1,5 +1,6 @@
 import logging
 import random
+import threading
 import time
 
 from openai import OpenAI
@@ -7,6 +8,39 @@ from openai import OpenAI
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+class _TokenBucket:
+    """Simple thread-safe token bucket for global request rate limiting.
+
+    Capacity equals the per-second rate (allows a 1-second burst). Set
+    ``rate <= 0`` to disable limiting entirely.
+    """
+
+    def __init__(self, rate_per_second: float) -> None:
+        self._rate = max(0.0, float(rate_per_second))
+        self._capacity = max(1.0, self._rate) if self._rate > 0 else 0.0
+        self._tokens = self._capacity
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        if self._rate <= 0:
+            return
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                elapsed = now - self._last
+                self._last = now
+                self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                needed = (1.0 - self._tokens) / self._rate
+            time.sleep(needed)
+
+
+_global_rate_limiter = _TokenBucket(settings.llm_rate_limit_rps)
 
 
 class OpenAICompatClient:
@@ -41,6 +75,7 @@ class OpenAICompatClient:
 
         for attempt in range(max_retries + 1):
             try:
+                _global_rate_limiter.acquire()
                 response = client.chat.completions.create(
                     model=model,
                     messages=[

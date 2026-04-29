@@ -4,10 +4,14 @@ import {
   Eye,
   FileText,
   FolderOpen,
+  MessageSquareText,
+  Moon,
   PanelLeftClose,
   Pencil,
   Plus,
-  Star
+  RefreshCw,
+  Star,
+  Sun,
 } from 'lucide-react'
 import type { ArtifactItem, DocumentSummary } from '../lib/api'
 import { makeDataUrl } from '../lib/api'
@@ -22,6 +26,11 @@ type Props = {
   uploading: boolean
   artifacts: ArtifactItem[]
   logs: string[]
+  theme: 'light' | 'dark'
+  chatVisible: boolean
+  visionEnabled: boolean
+  visionMode: 'auto' | 'manual'
+  activeStatus?: string
   onUpload: (file: File) => void
   onSelect: (documentId: string) => void
   onToggleFavorite: (documentId: string) => void
@@ -29,6 +38,10 @@ type Props = {
   onOpenInPane?: (artifact: ArtifactItem) => void
   onEditTex?: (artifact: ArtifactItem) => void
   onNewProject?: () => void
+  onToggleChat: () => void
+  onToggleVision: () => void
+  onToggleTheme: () => void
+  onRefreshStatus: () => void
 }
 
 function formatSize(bytes: number): string {
@@ -50,6 +63,11 @@ export function Sidebar({
   uploading,
   artifacts,
   logs,
+  theme,
+  chatVisible,
+  visionEnabled,
+  visionMode,
+  activeStatus,
   onUpload,
   onSelect,
   onToggleFavorite,
@@ -57,6 +75,10 @@ export function Sidebar({
   onOpenInPane,
   onEditTex,
   onNewProject,
+  onToggleChat,
+  onToggleVision,
+  onToggleTheme,
+  onRefreshStatus,
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [tab, setTab] = useState<Tab>('tasks')
@@ -80,8 +102,42 @@ export function Sidebar({
           <span className="brand-dot" />
           PaperReader
         </div>
-        <button className="icon-btn" title="Collapse" onClick={onCollapse}>
+        <button className="icon-btn" title="收起侧栏" onClick={onCollapse}>
           <PanelLeftClose size={18} />
+        </button>
+      </div>
+
+      <div className="sidebar-toolbar" role="toolbar" aria-label="工具">
+        <button
+          className={`icon-btn ${chatVisible ? 'active' : ''}`}
+          title={chatVisible ? '关闭对话' : '打开对话'}
+          onClick={onToggleChat}
+        >
+          <MessageSquareText size={16} />
+        </button>
+        <button
+          className={`icon-btn vision-btn ${visionEnabled ? 'active' : ''}`}
+          title={`视觉校验：${visionEnabled ? `开 (${visionMode === 'manual' ? '人工' : '自动'})` : '关'} · 点击切换`}
+          onClick={onToggleVision}
+        >
+          <span className="vision-glyph">
+            {visionEnabled ? (visionMode === 'manual' ? '人' : '自') : '×'}
+          </span>
+        </button>
+        <button
+          className="icon-btn"
+          title={`刷新状态：${activeStatus ?? '—'}`}
+          onClick={onRefreshStatus}
+        >
+          <RefreshCw size={16} />
+        </button>
+        <div className="toolbar-spacer" />
+        <button
+          className="icon-btn"
+          title={theme === 'dark' ? '切换到浅色' : '切换到深色'}
+          onClick={onToggleTheme}
+        >
+          {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
         </button>
       </div>
 

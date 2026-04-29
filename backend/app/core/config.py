@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
 
     # Vision-model adversarial check (Phase D)
-    vision_model: str = Field(default="Qwen3.5-397B-A17B", alias="VISION_MODEL")
+    vision_model: str = Field(default="GLM-4.5V", alias="VISION_MODEL")
     vision_check_enabled: bool = Field(default=True, alias="VISION_CHECK_ENABLED")
     vision_check_mode: str = Field(default="auto", alias="VISION_CHECK_MODE")  # auto | manual
     vision_check_max_pages: int = Field(default=8, alias="VISION_CHECK_MAX_PAGES")
@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     # Translation concurrency (chunked LLM calls)
     translate_concurrency: int = Field(default=4, alias="TRANSLATE_CONCURRENCY")
     translate_max_retries: int = Field(default=5, alias="TRANSLATE_MAX_RETRIES")
+    # Global LLM request rate limit (requests per second). 0 disables limiting.
+    # Applied as a shared token bucket across all threads to avoid 429s under
+    # high translate concurrency.
+    llm_rate_limit_rps: float = Field(default=4.0, alias="LLM_RATE_LIMIT_RPS")
+    # Max characters joined per IR batch request. Larger batches amortize RTT
+    # but risk hitting per-request token limits; tune per provider.
+    translate_batch_max_chars: int = Field(default=6000, alias="TRANSLATE_BATCH_MAX_CHARS")
 
     cors_origins_raw: str = Field(default="http://localhost:5173", alias="CORS_ORIGINS")
 

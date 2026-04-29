@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
-import { MessageSquareText, PanelLeftOpen, ScrollText } from 'lucide-react'
+import { PanelLeftOpen } from 'lucide-react'
 import { ChatPanel } from '../components/ChatPanel'
 import { PdfPane } from '../components/PdfPane'
 import { ProgressBar } from '../components/ProgressBar'
@@ -19,8 +19,10 @@ import {
 
 const FAV_LS_KEY = 'paperreader.favorites'
 const VISION_LS_KEY = 'paperreader.vision'
+const THEME_LS_KEY = 'paperreader.theme'
 
 type OverridePdf = { url: string; name: string } | null
+type Theme = 'light' | 'dark'
 
 export function ReaderPage() {
   const [summaries, setSummaries] = useState<DocumentSummary[]>([])
@@ -36,6 +38,7 @@ export function ReaderPage() {
   const [editTexOpen, setEditTexOpen] = useState(false)
   const [visionEnabled, setVisionEnabled] = useState(true)
   const [visionMode, setVisionMode] = useState<'auto' | 'manual'>('auto')
+  const [theme, setTheme] = useState<Theme>('light')
 
   const pollTimerRef = useRef<number | null>(null)
 
@@ -53,6 +56,14 @@ export function ReaderPage() {
         setVisionMode(v.mode === 'manual' ? 'manual' : 'auto')
       }
     } catch {}
+    try {
+      const raw = localStorage.getItem(THEME_LS_KEY)
+      if (raw === 'dark' || raw === 'light') {
+        setTheme(raw)
+      } else if (window.matchMedia?.('(prefers-color-scheme: dark)').matches) {
+        setTheme('dark')
+      }
+    } catch {}
   }, [])
   useEffect(() => {
     try {
@@ -64,6 +75,21 @@ export function ReaderPage() {
       localStorage.setItem(VISION_LS_KEY, JSON.stringify({ enabled: visionEnabled, mode: visionMode }))
     } catch {}
   }, [visionEnabled, visionMode])
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    try { localStorage.setItem(THEME_LS_KEY, theme) } catch {}
+  }, [theme])
+
+  const cycleVision = useCallback(() => {
+    if (!visionEnabled) { setVisionEnabled(true); setVisionMode('auto') }
+    else if (visionMode === 'auto') setVisionMode('manual')
+    else setVisionEnabled(false)
+  }, [visionEnabled, visionMode])
+
+  const refreshActive = useCallback(() => {
+    if (!activeId) return
+    void getDocumentStatus(activeId).then((d) => setDocCache((c) => ({ ...c, [activeId]: d })))
+  }, [activeId])
 
   const refreshSummaries = useCallback(async () => {
     try {
@@ -179,7 +205,7 @@ export function ReaderPage() {
 
   return (
     <div className="app-shell">
-      {showSidebar && (
+      {showSidebar ? (
         <Sidebar
           documents={summaries}
           activeDocumentId={activeId}
@@ -187,6 +213,11 @@ export function ReaderPage() {
           uploading={uploading}
           artifacts={artifacts}
           logs={logs}
+          theme={theme}
+          chatVisible={showChat}
+          visionEnabled={visionEnabled}
+          visionMode={visionMode}
+          activeStatus={activeDoc?.status}
           onUpload={(f) => void handleUpload(f)}
           onSelect={setActiveId}
           onToggleFavorite={handleToggleFavorite}
@@ -194,43 +225,20 @@ export function ReaderPage() {
           onOpenInPane={handleOpenInPane}
           onEditTex={() => setEditTexOpen(true)}
           onNewProject={() => setProjectOpen(true)}
+          onToggleChat={() => setShowChat((v) => !v)}
+          onToggleVision={cycleVision}
+          onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+          onRefreshStatus={refreshActive}
         />
+      ) : (
+        <button
+          className="sidebar-expand-btn"
+          title="打开侧栏"
+          onClick={() => setShowSidebar(true)}
+        >
+          <PanelLeftOpen size={18} />
+        </button>
       )}
-
-      <div className="rail">
-        {!showSidebar && (
-          <button className="rail-btn" title="打开侧栏" onClick={() => setShowSidebar(true)}>
-            <PanelLeftOpen size={18} />
-          </button>
-        )}
-        <button
-          className={`rail-btn ${showChat ? 'active' : ''}`}
-          title={showChat ? '关闭对话' : '打开对话'}
-          onClick={() => setShowChat((v) => !v)}
-        >
-          <MessageSquareText size={18} />
-        </button>
-        <button
-          className={`rail-btn ${visionEnabled ? 'active' : ''}`}
-          title={`视觉校验：${visionEnabled ? `开 (${visionMode === 'manual' ? '人工' : '自动'})` : '关'} · 点击切换`}
-          onClick={() => {
-            // 3-state cycle: off -> auto -> manual -> off
-            if (!visionEnabled) { setVisionEnabled(true); setVisionMode('auto') }
-            else if (visionMode === 'auto') setVisionMode('manual')
-            else setVisionEnabled(false)
-          }}
-        >
-          {visionEnabled ? (visionMode === 'manual' ? '人' : '自') : '×'}
-        </button>
-        <div className="rail-spacer" />
-        <button
-          className="rail-btn"
-          title={`状态：${activeDoc?.status ?? '—'}`}
-          onClick={() => activeId && void getDocumentStatus(activeId).then((d) => setDocCache((c) => ({ ...c, [activeId]: d })))}
-        >
-          <ScrollText size={18} />
-        </button>
-      </div>
 
       <main className="workspace">
         {activeDoc && (

@@ -15,7 +15,9 @@ A full-stack MVP for bilingual paper reading:
 - Show original and translated PDF side-by-side
 - Progress bar with stage breakdown and ETA (Phase A)
 - Artifact panel with scrolling, hover thumbnail preview, and drag-into-PDF-pane (Phase C)
-- Chat with paper context via OpenAI-compatible API
+- Chat with paper context via OpenAI-compatible API; full Markdown + GitHub-flavored tables + KaTeX math + soft line breaks for both user and assistant bubbles
+- **Light / dark theme**: toggle button in the sidebar toolbar; preference persists in `localStorage` and falls back to the OS `prefers-color-scheme`
+- Sidebar toolbar consolidates Chat-visibility / Vision-check tri-state / Status-refresh / Theme buttons; collapsing the sidebar only hides the sidebar (the PDF + chat workspace keeps the full width)
 - Premium interactions: generated-file list, reference preview, and template prompts (Highlight/Baseline/Limitations)
 
 ## Project Tree
@@ -115,7 +117,10 @@ cp .env.example .env
 
 - `TRANSLATE_CONCURRENCY` (default `4`) — number of parallel chunk translations.
 - `TRANSLATE_MAX_RETRIES` (default `5`) — retry budget per LLM call; uses jittered exponential backoff and respects `Retry-After`.
-- `OPENAI_VISION_MODEL` / `OPENAI_VISION_BASE_URL` / `OPENAI_VISION_API_KEY` — override the multimodal model used by the Phase D vision check (defaults reuse the main `OPENAI_*` vars).
+- `LLM_RATE_LIMIT_RPS` (default `4`) — global token-bucket cap on LLM requests per second across all worker threads. Set to `0` to disable. Tune below the provider/key's published RPM to avoid 429s. Note: this limiter is per uvicorn process; if you scale to N workers, the effective limit becomes `N × LLM_RATE_LIMIT_RPS`.
+- `TRANSLATE_BATCH_MAX_CHARS` (default `6000`) — max joined character length per IR batch request. Larger values amortize round-trip latency at the cost of larger per-call payloads.
+- `VISION_MODEL` (default `GLM-4.5V`) — multimodal model used by the Phase D vision check. Must be a vision-capable model accessible via the same OpenAI-compatible endpoint as `OPENAI_BASE_URL` (e.g. `GLM-4.5V`, `GLM-4.6V`, `Qwen3-VL-30B-A3B-Instruct`, `Qwen3-VL-235B-A22B-Instruct`).
+- `VISION_CHECK_ENABLED` (default `true`), `VISION_CHECK_MODE` (`auto` | `manual`), `VISION_CHECK_MAX_PAGES` (default `8`) — toggle/limit Phase D check.
 - `LATEXMK_PATH` — absolute path to `latexmk` if not on `PATH`.
 
 ### MinerU PDF parsing

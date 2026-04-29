@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
+import remarkBreaks from 'remark-breaks'
 import rehypeKatex from 'rehype-katex'
 import { BookOpen, Send, Settings2, X } from 'lucide-react'
 import type { ReferenceItem } from '../lib/api'
@@ -155,18 +156,14 @@ export function ChatPanel({ documentId, references, onSend }: Props) {
         {history.map((m, idx) => (
           <div key={idx} className={`bubble-row ${m.role}`}>
             <div className={`bubble ${m.role}`}>
-              {m.role === 'assistant' ? (
-                <div className="prose">
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm, remarkMath]}
-                    rehypePlugins={[rehypeKatex]}
-                  >
-                    {m.content}
-                  </ReactMarkdown>
-                </div>
-              ) : (
-                <div className="user-text">{m.content}</div>
-              )}
+              <div className="prose">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
+                  rehypePlugins={[rehypeKatex]}
+                >
+                  {m.content}
+                </ReactMarkdown>
+              </div>
             </div>
           </div>
         ))}

@@ -8,6 +8,7 @@ translation and LaTeX rendering can consume independently.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Iterable, Union
 
@@ -79,13 +80,52 @@ def _runs_from_paragraph_content(items: Iterable) -> list[Run]:
         kind = item.get("type")
         content = item.get("content")
         if kind == "text" and isinstance(content, str):
-            text = content
-            if text:
-                runs.append(TextRun(text=text))
+            # MinerU sometimes returns an entire sentence (including `$…$`
+            # inline math) as a single "text" item instead of splitting it into
+            # alternating "text"/"equation_inline" items.  Split here so that
+            # inline math never reaches the translation layer as plain text.
+            for run in _split_text_at_math(content):
+                runs.append(run)
         elif kind == "equation_inline" and isinstance(content, str):
             latex = content.strip()
             if latex:
                 runs.append(InlineMath(latex=latex))
+    return runs
+
+
+# Matches $...$ (no nested $), \[...\] or \(...\) display/inline math.
+_INLINE_MATH_SPLIT = re.compile(
+    r"(\$[^$\n]+?\$"           # $...$
+    r"|\\\[[^\]]*?\\\]"        # \[...\]
+    r"|\\\([^\)]*?\\\))"       # \(…\)
+)
+
+
+def _split_text_at_math(text: str) -> list[Run]:
+    """Split a raw text string at math-delimiter boundaries.
+
+    Returns a list of alternating TextRun / InlineMath nodes so that formula
+    content is never sent to the translation layer as translatable prose.
+    """
+    parts = _INLINE_MATH_SPLIT.split(text)
+    runs: list[Run] = []
+    for i, part in enumerate(parts):
+        if not part:
+            continue
+        if i % 2 == 1:
+            # Odd indices are the captured math groups.
+            latex = part
+            # Strip outer delimiters to store bare LaTeX.
+            if latex.startswith("$") and latex.endswith("$"):
+                latex = latex[1:-1]
+            elif latex.startswith("\\[") and latex.endswith("\\]"):
+                latex = latex[2:-2]
+            elif latex.startswith("\\(") and latex.endswith("\\)"):
+                latex = latex[2:-2]
+            runs.append(InlineMath(latex=latex.strip()))
+        else:
+            if part.strip():
+                runs.append(TextRun(text=part))
     return runs
 
 
