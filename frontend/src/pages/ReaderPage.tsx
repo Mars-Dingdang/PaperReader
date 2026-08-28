@@ -4,91 +4,97 @@ import { PanelLeftOpen } from 'lucide-react'
 import { ChatPanel } from '../components/ChatPanel'
 import { PdfPane } from '../components/PdfPane'
 import { ProgressBar } from '../components/ProgressBar'
+import { ProfileModal } from '../components/ProfileModal'
 import { ProjectDrawer } from '../components/ProjectDrawer'
 import { ReviewModal } from '../components/ReviewModal'
 import { Sidebar } from '../components/Sidebar'
 import { TexEditorModal } from '../components/TexEditorModal'
-import type { ArtifactItem, DocumentStatus, DocumentSummary } from '../lib/api'
+import type { ArtifactItem, AuthUser, DocumentStatus, DocumentSummary, UserSettings } from '../lib/api'
 import {
+  deleteDocument,
   getDocumentStatus,
   listDocuments,
+  logout,
   makeDataUrl,
   sendChat,
+  updateSettings,
   uploadFile
 } from '../lib/api'
 
-const FAV_LS_KEY = 'paperreader.favorites'
-const VISION_LS_KEY = 'paperreader.vision'
-const THEME_LS_KEY = 'paperreader.theme'
-
 type OverridePdf = { url: string; name: string } | null
-type Theme = 'light' | 'dark'
 
-export function ReaderPage() {
+type Props = {
+  user: AuthUser
+  onUserChange: (user: AuthUser) => void
+  onLogout: () => void
+}
+
+export function ReaderPage({ user, onUserChange, onLogout }: Props) {
   const [summaries, setSummaries] = useState<DocumentSummary[]>([])
   const [activeId, setActiveId] = useState<string | undefined>(undefined)
   const [docCache, setDocCache] = useState<Record<string, DocumentStatus>>({})
   const [uploading, setUploading] = useState(false)
-  const [favorites, setFavorites] = useState<string[]>([])
   const [showSidebar, setShowSidebar] = useState(true)
   const [showChat, setShowChat] = useState(true)
   const [overrideLeft, setOverrideLeft] = useState<OverridePdf>(null)
   const [overrideRight, setOverrideRight] = useState<OverridePdf>(null)
   const [projectOpen, setProjectOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
   const [editTexOpen, setEditTexOpen] = useState(false)
-  const [visionEnabled, setVisionEnabled] = useState(true)
-  const [visionMode, setVisionMode] = useState<'auto' | 'manual'>('auto')
-  const [theme, setTheme] = useState<Theme>('light')
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
+  const [theme, setTheme] = useState<UserSettings['theme']>(user.settings.theme)
+  const [visionEnabled, setVisionEnabled] = useState(user.settings.vision_enabled)
+  const [visionMode, setVisionMode] = useState<UserSettings['vision_mode']>(user.settings.vision_mode)
+  const [favorites, setFavorites] = useState<string[]>(user.settings.favorites)
 
   const pollTimerRef = useRef<number | null>(null)
 
-  // Load preferences
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(FAV_LS_KEY)
-      if (raw) setFavorites(JSON.parse(raw))
-    } catch {}
-    try {
-      const raw = localStorage.getItem(VISION_LS_KEY)
-      if (raw) {
-        const v = JSON.parse(raw)
-        setVisionEnabled(!!v.enabled)
-        setVisionMode(v.mode === 'manual' ? 'manual' : 'auto')
-      }
-    } catch {}
-    try {
-      const raw = localStorage.getItem(THEME_LS_KEY)
-      if (raw === 'dark' || raw === 'light') {
-        setTheme(raw)
-      } else if (window.matchMedia?.('(prefers-color-scheme: dark)').matches) {
-        setTheme('dark')
-      }
-    } catch {}
-  }, [])
-  useEffect(() => {
-    try {
-      localStorage.setItem(FAV_LS_KEY, JSON.stringify(favorites))
-    } catch {}
-  }, [favorites])
-  useEffect(() => {
-    try {
-      localStorage.setItem(VISION_LS_KEY, JSON.stringify({ enabled: visionEnabled, mode: visionMode }))
-    } catch {}
-  }, [visionEnabled, visionMode])
+    setTheme(user.settings.theme)
+    setVisionEnabled(user.settings.vision_enabled)
+    setVisionMode(user.settings.vision_mode)
+    setFavorites(user.settings.favorites)
+    setSettingsLoaded(true)
+  }, [user])
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme
-    try { localStorage.setItem(THEME_LS_KEY, theme) } catch {}
   }, [theme])
 
+  useEffect(() => {
+    if (!settingsLoaded) return
+    void (async () => {
+      try {
+        const nextSettings = await updateSettings({
+          theme,
+          vision_enabled: visionEnabled,
+          vision_mode: visionMode,
+          favorites
+        })
+        onUserChange({ ...user, settings: nextSettings })
+      } catch (e) {
+        console.error(e)
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [theme, visionEnabled, visionMode, favorites])
+
   const cycleVision = useCallback(() => {
-    if (!visionEnabled) { setVisionEnabled(true); setVisionMode('auto') }
-    else if (visionMode === 'auto') setVisionMode('manual')
-    else setVisionEnabled(false)
+    if (!visionEnabled) {
+      setVisionEnabled(true)
+      setVisionMode('auto')
+    } else if (visionMode === 'auto') {
+      setVisionMode('manual')
+    } else {
+      setVisionEnabled(false)
+    }
   }, [visionEnabled, visionMode])
 
   const refreshActive = useCallback(() => {
     if (!activeId) return
-    void getDocumentStatus(activeId).then((d) => setDocCache((c) => ({ ...c, [activeId]: d })))
+    void getDocumentStatus(activeId)
+      .then((d) => setDocCache((c) => ({ ...c, [activeId]: d })))
+      .catch((e) => console.error(e))
   }, [activeId])
 
   const refreshSummaries = useCallback(async () => {
@@ -96,24 +102,22 @@ export function ReaderPage() {
       const list = await listDocuments()
       setSummaries(list)
       return list
-    } catch (e) {
-      console.error(e)
+    } catch (e: any) {
+      if (e?.status === 401) onLogout()
+      else console.error(e)
       return []
     }
-  }, [])
+  }, [onLogout])
 
-  // Initial load
   useEffect(() => {
     void (async () => {
       const list = await refreshSummaries()
-      if (list.length > 0 && !activeId) {
-        setActiveId(list[0].document_id)
+      if (list.length > 0) {
+        setActiveId((prev) => prev && list.some((item) => item.document_id === prev) ? prev : list[0].document_id)
       }
     })()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [refreshSummaries])
 
-  // Poll active document
   useEffect(() => {
     if (pollTimerRef.current) {
       window.clearInterval(pollTimerRef.current)
@@ -128,7 +132,13 @@ export function ReaderPage() {
         setSummaries((prev) =>
           prev.map((s) =>
             s.document_id === activeId
-              ? { ...s, status: data.status, has_translated_pdf: !!data.translated_pdf_url }
+              ? {
+                  ...s,
+                  status: data.status,
+                  has_translated_pdf: !!data.translated_pdf_url,
+                  updated_at: data.updated_at,
+                  last_opened_at: data.last_opened_at
+                }
               : s
           )
         )
@@ -138,8 +148,9 @@ export function ReaderPage() {
             pollTimerRef.current = null
           }
         }
-      } catch (e) {
-        console.error(e)
+      } catch (e: any) {
+        if (e?.status === 401) onLogout()
+        else console.error(e)
       }
     }
     void fetchOnce()
@@ -150,14 +161,12 @@ export function ReaderPage() {
         pollTimerRef.current = null
       }
     }
-  }, [activeId])
+  }, [activeId, onLogout])
 
   const activeDoc: DocumentStatus | undefined = activeId ? docCache[activeId] : undefined
-
   const originalPdfUrl = activeDoc?.original_pdf_url ? makeDataUrl(activeDoc.original_pdf_url) : undefined
   const translatedPdfUrl = activeDoc?.translated_pdf_url ? makeDataUrl(activeDoc.translated_pdf_url) : undefined
 
-  // Reset overrides when switching active doc
   useEffect(() => {
     setOverrideLeft(null)
     setOverrideRight(null)
@@ -187,10 +196,37 @@ export function ReaderPage() {
     )
   }, [])
 
+  const handleDeleteDocument = useCallback(async (docId: string) => {
+    if (!window.confirm('删除这条历史记录？对应文件不会从系统默认输出目录移除。')) return
+    try {
+      await deleteDocument(docId)
+      setDocCache((prev) => {
+        const next = { ...prev }
+        delete next[docId]
+        return next
+      })
+      setFavorites((prev) => prev.filter((item) => item !== docId))
+      setSummaries((prev) => prev.filter((item) => item.document_id !== docId))
+      setActiveId((prev) => (prev === docId ? undefined : prev))
+    } catch (e) {
+      console.error(e)
+    }
+  }, [])
+
   const handleOpenInPane = useCallback((artifact: ArtifactItem) => {
     if (!artifact.url) return
     setOverrideRight({ url: makeDataUrl(artifact.url), name: artifact.name })
   }, [])
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await logout()
+    } catch (e) {
+      console.error(e)
+    } finally {
+      onLogout()
+    }
+  }, [onLogout])
 
   const chatRefs = activeDoc?.references ?? []
   const artifacts = activeDoc?.artifacts ?? []
@@ -207,6 +243,7 @@ export function ReaderPage() {
     <div className="app-shell">
       {showSidebar ? (
         <Sidebar
+          user={user}
           documents={summaries}
           activeDocumentId={activeId}
           favorites={favorites}
@@ -221,10 +258,13 @@ export function ReaderPage() {
           onUpload={(f) => void handleUpload(f)}
           onSelect={setActiveId}
           onToggleFavorite={handleToggleFavorite}
+          onDeleteDocument={handleDeleteDocument}
           onCollapse={() => setShowSidebar(false)}
           onOpenInPane={handleOpenInPane}
           onEditTex={() => setEditTexOpen(true)}
           onNewProject={() => setProjectOpen(true)}
+          onOpenProfile={() => setProfileOpen(true)}
+          onLogout={() => void handleLogout()}
           onToggleChat={() => setShowChat((v) => !v)}
           onToggleVision={cycleVision}
           onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
@@ -252,7 +292,7 @@ export function ReaderPage() {
         )}
         {!activeId ? (
           <div className="workspace-empty">
-            <h2>欢迎使用 PaperReader</h2>
+            <h2>欢迎回来，{user.username}</h2>
             <p className="muted">点击左侧「新解析」上传 PDF 或 TeX 文件开始</p>
           </div>
         ) : (
@@ -310,12 +350,17 @@ export function ReaderPage() {
         visionCheckEnabled={visionEnabled}
         visionCheckMode={visionMode}
       />
+      <ProfileModal
+        open={profileOpen}
+        user={user}
+        onClose={() => setProfileOpen(false)}
+        onUserChange={onUserChange}
+      />
       {activeId && activeDoc?.status === 'awaiting_review' && pendingReviews.length > 0 && (
         <ReviewModal
           documentId={activeId}
           proposals={pendingReviews}
           onResolved={() => {
-            // trigger an immediate refresh
             void getDocumentStatus(activeId).then((d) => setDocCache((c) => ({ ...c, [activeId]: d })))
           }}
         />

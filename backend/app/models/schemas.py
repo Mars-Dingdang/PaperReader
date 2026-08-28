@@ -41,6 +41,8 @@ class DocumentStatusResponse(BaseModel):
     status: str
     source_type: str
     source_filename: str = ""
+    updated_at: str | None = None
+    last_opened_at: str | None = None
     original_pdf_url: str | None = None
     translated_pdf_url: str | None = None
     artifacts: list[ArtifactItem] = []
@@ -74,4 +76,6 @@ class DocumentSummary(BaseModel):
     source_filename: str = ""
     size_bytes: int = 0
     created_at: str | None = None
+    updated_at: str | None = None
+    last_opened_at: str | None = None
     has_translated_pdf: bool = False

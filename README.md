@@ -3,6 +3,9 @@
 ![](./images/demo1.png)
 
 A full-stack MVP for bilingual paper reading:
+- Username/password account system with login, registration, remember-me session, and a personal center
+- User-scoped persistent history backed by local SQLite; processed files can be reopened after restart
+- Personal center for avatar upload, password change, and per-user LLM settings (`API Key` / `Base URL` / `Model`)
 - Upload `.pdf`, single `.tex`, or a multi-file TeX project (Phase B)
 - Parse PDF via the [MinerU](https://mineru.net/apiManage/docs) cloud API (精准解析, Bearer token)
 - Concurrent LLM translation (Phase 优化) with placeholder protection, jittered retry and `Retry-After` honoring
@@ -16,7 +19,7 @@ A full-stack MVP for bilingual paper reading:
 - Progress bar with stage breakdown and ETA (Phase A)
 - Artifact panel with scrolling, hover thumbnail preview, and drag-into-PDF-pane (Phase C)
 - Chat with paper context via OpenAI-compatible API; full Markdown + GitHub-flavored tables + KaTeX math + soft line breaks for both user and assistant bubbles
-- **Light / dark theme**: toggle button in the sidebar toolbar; preference persists in `localStorage` and falls back to the OS `prefers-color-scheme`
+- **Light / dark theme**: persists per user account via backend settings
 - Sidebar toolbar consolidates Chat-visibility / Vision-check tri-state / Status-refresh / Theme buttons; collapsing the sidebar only hides the sidebar (the PDF + chat workspace keeps the full width)
 - Premium interactions: generated-file list, reference preview, and template prompts (Highlight/Baseline/Limitations)
 
@@ -27,15 +30,18 @@ PaperReader/
 ├── backend/
 │   └── app/
 │       ├── api/
+│       │   ├── routes_auth.py
 │       │   ├── routes_chat.py
 │       │   ├── routes_document.py
 │       │   └── routes_upload.py
 │       ├── core/
-│       │   └── config.py
+│       │   ├── config.py
+│       │   └── database.py
 │       ├── models/
 │       │   ├── schemas.py
 │       │   └── store.py
 │       ├── services/
+│       │   ├── auth_service.py
 │       │   ├── document_pipeline.py
 │       │   ├── latex_service.py
 │       │   ├── llm_client.py
@@ -47,13 +53,16 @@ PaperReader/
 ├── frontend/
 │   ├── src/
 │   │   ├── components/
+│   │   │   ├── AuthScreen.tsx
 │   │   │   ├── ChatPanel.tsx
 │   │   │   ├── PdfPane.tsx
-│   │   │   └── UploadPanel.tsx
+│   │   │   ├── ProfileModal.tsx
+│   │   │   └── Sidebar.tsx
 │   │   ├── lib/
 │   │   │   └── api.ts
 │   │   ├── pages/
 │   │   │   └── ReaderPage.tsx
+│   │   ├── App.tsx
 │   │   ├── main.tsx
 │   │   └── styles.css
 │   ├── index.html
@@ -61,8 +70,8 @@ PaperReader/
 │   ├── tsconfig.json
 │   └── vite.config.ts
 ├── data/
-│   ├── cache/
 │   ├── outputs/
+│   ├── paperreader.db
 │   └── uploads/
 ├── infra/
 │   └── Dockerfile.backend
@@ -112,9 +121,13 @@ cp .env.example .env
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
 - `MINERU_API_KEY` (apply at https://mineru.net/apiManage/docs)
+- `AUTH_SECRET_KEY` for local session signing/encryption in account mode
 
 ### Optional / tuning variables
 
+- `SQLITE_DB_NAME` (default `paperreader.db`) — local persistent DB file under `DATA_DIR`.
+- `SESSION_DAYS` (default `1`) — normal login session lifetime.
+- `REMEMBER_ME_DAYS` (default `30`) — remember-me session lifetime.
 - `TRANSLATE_CONCURRENCY` (default `4`) — number of parallel chunk translations.
 - `TRANSLATE_MAX_RETRIES` (default `5`) — retry budget per LLM call; uses jittered exponential backoff and respects `Retry-After`.
 - `LLM_RATE_LIMIT_RPS` (default `4`) — global token-bucket cap on LLM requests per second across all worker threads. Set to `0` to disable. Tune below the provider/key's published RPM to avoid 429s. Note: this limiter is per uvicorn process; if you scale to N workers, the effective limit becomes `N × LLM_RATE_LIMIT_RPS`.
@@ -215,6 +228,35 @@ python -m compileall backend/app     # 快速语法检查
 
 > 提示：上传与解析在请求链路中是同步执行的，处理较大 PDF 时前端会持续轮询 `GET /api/document/{id}` 直至 `status` 变为 `done` 或 `failed`。
 
+## Account System
+
+- All upload, project, history, chat, review, and recompile APIs now require login.
+- Login uses username + password and an HttpOnly session cookie.
+- `记住我` extends the cookie lifetime; it does not store the password in plaintext.
+- User data is persisted in local SQLite:
+  - `users`
+  - `sessions`
+  - `user_settings`
+  - `documents`
+  - `projects`
+- User-scoped settings now include:
+  - theme
+  - vision-check preference
+  - favorites
+  - personal `API Key` / `Base URL` / `Model`
+
+### Personal center
+
+After login, the sidebar account area opens a personal center where users can:
+
+- upload/change avatar
+- rename username
+- change password
+- configure personal LLM settings
+- manage persistent reading preferences
+
+Chat uses the current user's saved LLM settings by default. If they are empty, backend `.env` defaults are used.
+
 ## Docker Run
 
 ```bash
@@ -229,9 +271,19 @@ Services:
 ## API Endpoints
 
 - `GET /health`
+- **Auth / profile**
+  - `POST /api/auth/register`
+  - `POST /api/auth/login`
+  - `POST /api/auth/logout`
+  - `GET /api/auth/me`
+  - `PATCH /api/auth/profile`
+  - `POST /api/auth/change-password`
+  - `POST /api/auth/avatar`
+  - `PUT /api/settings/me`
 - `POST /api/upload` (multipart file: `.pdf` or `.tex`; form fields `vision_check_enabled`, `vision_check_mode`)
-- `GET /api/documents` — 列出所有文档摘要（用于侧栏文件切换）
+- `GET /api/documents` — 列出当前登录用户的文档摘要
 - `GET /api/document/{document_id}`
+- `DELETE /api/document/{document_id}` — 软删除当前用户的一条历史记录
 - `POST /api/chat`
 - **Project (Phase B)**
   - `POST /api/project` — 创建 TeX 项目
@@ -249,6 +301,7 @@ Services:
 
 Now includes:
 - `source_filename`
+- `updated_at`, `last_opened_at`
 - `artifacts` (uploaded and generated files)
 - `references` (extracted bibliography entries for preview)
 - `progress`, `current_stage`, `current_stage_label`, `eta_seconds`, `stages` (Phase A)
@@ -268,7 +321,7 @@ Now includes:
 }
 ```
 
-`override_*` fields are optional and let frontend temporarily override backend `.env` defaults.
+`override_*` fields are optional. In the current UI, chat normally uses the logged-in user's saved personal settings.
 
 ## Platform Notes
 
@@ -287,7 +340,7 @@ Now includes:
 ## Current MVP Boundaries
 
 - Upload processing is still synchronous in request path (no background job handoff yet); translation chunks within a document are run concurrently via a thread pool.
-- Document and project state is in-memory and resets when backend restarts.
+- Document/project/account state is persisted in SQLite, but the app is still designed for local/small-scale deployment rather than hardened internet-scale multi-tenant use.
 - Reference extraction is heuristic (section/line-pattern based), not a full citation parser.
-- Frontend supports panel toggles, drag-and-drop artifact preview, vision-check manual review and an in-browser `translated.tex` editor, but no account-tier gating yet.
+- Frontend supports login/register, a personal center, panel toggles, drag-and-drop artifact preview, vision-check manual review and an in-browser `translated.tex` editor.
 - LaTeX compile uses a strict pass first, then a lenient `-f` pass so the pipeline rarely ends in hard failure; warnings are surfaced via `last_compile_warning` and the manual editor lets users patch the source and recompile in-place.

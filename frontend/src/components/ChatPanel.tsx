@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import remarkBreaks from 'remark-breaks'
 import rehypeKatex from 'rehype-katex'
-import { BookOpen, Send, Settings2, X } from 'lucide-react'
+import { BookOpen, Send, X } from 'lucide-react'
 import type { ReferenceItem } from '../lib/api'
 
 type Props = {
@@ -26,39 +26,14 @@ const TEMPLATE_PROMPTS = [
   { key: 'limitations', label: 'Limitations', prompt: 'Please extract and summarize the paper limitations, including explicit limitations and potential hidden risks.' }
 ]
 
-const LS_KEY = 'paperreader.chat.settings'
-
 export function ChatPanel({ documentId, references, onSend }: Props) {
   const [message, setMessage] = useState('')
   const [history, setHistory] = useState<Msg[]>([])
   const [loading, setLoading] = useState(false)
-  const [showSettings, setShowSettings] = useState(false)
   const [showRefs, setShowRefs] = useState(false)
   const [selectedReference, setSelectedReference] = useState<ReferenceItem | null>(null)
 
-  const [apiKey, setApiKey] = useState('')
-  const [baseUrl, setBaseUrl] = useState('')
-  const [model, setModel] = useState('')
-
   const scrollRef = useRef<HTMLDivElement | null>(null)
-
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(LS_KEY)
-      if (raw) {
-        const obj = JSON.parse(raw)
-        setApiKey(obj.apiKey ?? '')
-        setBaseUrl(obj.baseUrl ?? '')
-        setModel(obj.model ?? '')
-      }
-    } catch {}
-  }, [])
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(LS_KEY, JSON.stringify({ apiKey, baseUrl, model }))
-    } catch {}
-  }, [apiKey, baseUrl, model])
 
   useEffect(() => {
     setHistory([])
@@ -79,10 +54,7 @@ export function ChatPanel({ documentId, references, onSend }: Props) {
     setLoading(true)
     try {
       const answer = await onSend({
-        message: text,
-        override_api_key: apiKey || undefined,
-        override_base_url: baseUrl || undefined,
-        override_model: model || undefined
+        message: text
       })
       setHistory((h) => [...h, { role: 'assistant', content: answer, ts: Date.now() }])
     } catch (e: any) {
@@ -107,37 +79,10 @@ export function ChatPanel({ documentId, references, onSend }: Props) {
           >
             <BookOpen size={16} />
           </button>
-          <button
-            className={`icon-btn ${showSettings ? 'active' : ''}`}
-            title="设置"
-            onClick={() => setShowSettings((v) => !v)}
-          >
-            <Settings2 size={16} />
-          </button>
         </div>
       </div>
 
-      {showSettings && (
-        <div className="chat-settings">
-          <div className="settings-head">
-            <span>对话设置（覆盖默认 LLM 配置）</span>
-            <button className="icon-btn" onClick={() => setShowSettings(false)}><X size={14} /></button>
-          </div>
-          <label className="field">
-            <span>API Key</span>
-            <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-..." />
-          </label>
-          <label className="field">
-            <span>Base URL</span>
-            <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" />
-          </label>
-          <label className="field">
-            <span>Model</span>
-            <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="gpt-4o-mini" />
-          </label>
-          <div className="muted small">设置自动保存在浏览器本地</div>
-        </div>
-      )}
+      <div className="chat-banner small muted">聊天默认使用个人中心里保存的 API Key / Base URL / Model。</div>
 
       <div className="template-row">
         {TEMPLATE_PROMPTS.map((item) => (

@@ -4,22 +4,26 @@ import {
   Eye,
   FileText,
   FolderOpen,
+  LogOut,
   MessageSquareText,
   Moon,
   PanelLeftClose,
   Pencil,
   Plus,
   RefreshCw,
+  Settings,
   Star,
   Sun,
+  Trash2,
 } from 'lucide-react'
-import type { ArtifactItem, DocumentSummary } from '../lib/api'
+import type { ArtifactItem, AuthUser, DocumentSummary } from '../lib/api'
 import { makeDataUrl } from '../lib/api'
 import { ArtifactPreviewTip } from './ArtifactPreviewTip'
 
 type Tab = 'tasks' | 'favorites'
 
 type Props = {
+  user: AuthUser
   documents: DocumentSummary[]
   activeDocumentId?: string
   favorites: string[]
@@ -34,10 +38,13 @@ type Props = {
   onUpload: (file: File) => void
   onSelect: (documentId: string) => void
   onToggleFavorite: (documentId: string) => void
+  onDeleteDocument: (documentId: string) => void
   onCollapse: () => void
   onOpenInPane?: (artifact: ArtifactItem) => void
   onEditTex?: (artifact: ArtifactItem) => void
   onNewProject?: () => void
+  onOpenProfile: () => void
+  onLogout: () => void
   onToggleChat: () => void
   onToggleVision: () => void
   onToggleTheme: () => void
@@ -56,7 +63,13 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={cls}>{status}</span>
 }
 
+function formatTime(value?: string | null): string {
+  if (!value) return '刚刚创建'
+  return new Date(value).toLocaleString()
+}
+
 export function Sidebar({
+  user,
   documents,
   activeDocumentId,
   favorites,
@@ -71,10 +84,13 @@ export function Sidebar({
   onUpload,
   onSelect,
   onToggleFavorite,
+  onDeleteDocument,
   onCollapse,
   onOpenInPane,
   onEditTex,
   onNewProject,
+  onOpenProfile,
+  onLogout,
   onToggleChat,
   onToggleVision,
   onToggleTheme,
@@ -86,6 +102,7 @@ export function Sidebar({
   const [showLogs, setShowLogs] = useState(false)
   const [hoverPreview, setHoverPreview] = useState<{ artifact: ArtifactItem; rect: DOMRect } | null>(null)
   const hoverTimerRef = useRef<number | null>(null)
+
   useEffect(() => () => {
     if (hoverTimerRef.current) window.clearTimeout(hoverTimerRef.current)
   }, [])
@@ -177,7 +194,7 @@ export function Sidebar({
           onClick={() => setTab('tasks')}
         >
           <FolderOpen size={16} />
-          任务管理
+          历史记录
         </button>
         <button
           className={`nav-item ${tab === 'favorites' ? 'active' : ''}`}
@@ -193,7 +210,7 @@ export function Sidebar({
       <div className="doc-list">
         {visible.length === 0 ? (
           <div className="muted small" style={{ padding: '12px' }}>
-            {tab === 'favorites' ? '尚无收藏' : '暂无任务，点击「新解析」上传文件'}
+            {tab === 'favorites' ? '尚无收藏' : '暂无历史记录，点击「新解析」上传文件'}
           </div>
         ) : (
           visible.map((doc) => {
@@ -214,6 +231,7 @@ export function Sidebar({
                     <span>{formatSize(doc.size_bytes)}</span>
                     <StatusBadge status={doc.status} />
                   </div>
+                  <div className="muted tiny">{formatTime(doc.last_opened_at || doc.updated_at || doc.created_at)}</div>
                 </div>
                 <button
                   className={`star-btn ${fav ? 'on' : ''}`}
@@ -224,6 +242,16 @@ export function Sidebar({
                   }}
                 >
                   <Star size={14} fill={fav ? 'currentColor' : 'none'} />
+                </button>
+                <button
+                  className="star-btn"
+                  title="移除历史"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onDeleteDocument(doc.document_id)
+                  }}
+                >
+                  <Trash2 size={14} />
                 </button>
                 <ChevronRight size={14} className="chev" />
               </div>
@@ -337,6 +365,32 @@ export function Sidebar({
           </div>
         </>
       )}
+
+      <div className="sidebar-divider" />
+      <div className="account-card">
+        <div className="account-main">
+          {user.avatar_url ? (
+            <img src={makeDataUrl(user.avatar_url)} alt={user.username} className="avatar-image" />
+          ) : (
+            <div className="avatar-fallback">{user.username.slice(0, 1).toUpperCase()}</div>
+          )}
+          <div className="account-meta">
+            <div className="account-name">{user.username}</div>
+            <div className="muted small">最近登录：{formatTime(user.last_login_at)}</div>
+          </div>
+        </div>
+        <div className="account-actions">
+          <button className="btn small-btn" onClick={onOpenProfile}>
+            <Settings size={14} />
+            个人中心
+          </button>
+          <button className="btn small-btn" onClick={onLogout}>
+            <LogOut size={14} />
+            退出
+          </button>
+        </div>
+      </div>
+
       {hoverPreview && hoverPreview.artifact.url && (
         <ArtifactPreviewTip
           url={hoverPreview.artifact.url}

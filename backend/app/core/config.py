@@ -21,10 +21,15 @@ class Settings(BaseSettings):
     data_dir: Path = Field(default=Path("../data"), alias="DATA_DIR")
     upload_dir_name: str = Field(default="uploads", alias="UPLOAD_DIR_NAME")
     output_dir_name: str = Field(default="outputs", alias="OUTPUT_DIR_NAME")
+    sqlite_db_name: str = Field(default="paperreader.db", alias="SQLITE_DB_NAME")
 
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
+
+    auth_secret_key: str = Field(default="paperreader-dev-secret", alias="AUTH_SECRET_KEY")
+    session_days: int = Field(default=1, alias="SESSION_DAYS")
+    remember_me_days: int = Field(default=30, alias="REMEMBER_ME_DAYS")
 
     mineru_api_key: str = Field(default="", alias="MINERU_API_KEY")
     mineru_base_url: str = Field(default="https://mineru.net/api/v4", alias="MINERU_BASE_URL")

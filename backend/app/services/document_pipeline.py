@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 
 from app.core.config import settings
-from app.models.store import ArtifactEntry, DOCUMENTS, DocumentRecord, ReferenceEntry
+from app.models.store import ArtifactEntry, DocumentRecord, ReferenceEntry, save_document
 from app.services.latex_service import (
     compile_tex_project,
     compile_tex_project_with_fallback,
@@ -247,17 +247,17 @@ def _extract_references_from_text(text: str) -> list[ReferenceEntry]:
     return refs
 
 
-def create_document_record(source_path: Path, source_type: str) -> DocumentRecord:
+def create_document_record(source_path: Path, source_type: str, owner_user_id: int = 0) -> DocumentRecord:
     document_id = str(uuid.uuid4())
     source_filename = source_path.name.split("_", 1)[-1] if "_" in source_path.name else source_path.name
     record = DocumentRecord(
         document_id=document_id,
+        owner_user_id=owner_user_id,
         source_type=source_type,
         source_path=source_path,
         source_filename=source_filename,
     )
-    DOCUMENTS[document_id] = record
-    return record
+    return save_document(record)
 
 
 def process_document(
@@ -269,6 +269,7 @@ def process_document(
     record.status = "processing"
     record.logs.append("Processing started")
     init_stages(record, vision_check_enabled=record.vision_check_enabled)
+    save_document(record)
     try:
         record.size_bytes = record.source_path.stat().st_size
     except OSError:
@@ -349,7 +350,7 @@ def process_document(
 
             record.status = "done"
             record.logs.append("Processing done")
-            return record
+            return save_document(record)
         else:
             with with_stage(record, "mineru"):
                 record.logs.append("Handling source PDF")
@@ -473,5 +474,4 @@ def process_document(
     except Exception as exc:
         record.status = "failed"
         record.logs.append(f"Error: {exc}")
-
-    return record
+    return save_document(record)
