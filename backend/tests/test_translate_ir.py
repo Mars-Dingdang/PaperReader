@@ -1,4 +1,7 @@
+import pytest
+
 from app.services import translate_service
+from app.services.llm_client import LLMOutputTruncatedError
 from app.services.mineru_layout import (
     DisplayMath,
     Image,
@@ -77,3 +80,54 @@ def test_translate_ir_falls_back_when_batch_count_mismatches(monkeypatch):
     assert len(calls) == 5
     assert ir[0].text == "CN(Hello World)"
     assert ir[1].runs[1].latex == "x^2"  # math still untouched
+
+
+def test_translate_ir_splits_long_logical_segment_and_reassembles(monkeypatch):
+    calls: list[str] = []
+
+    def fake_chat(message, system_prompt, **kwargs):
+        calls.append(message)
+        if "@@SEG@@" in message:
+            return "@@SEG@@".join(f"译({part.strip()})" for part in message.split("@@SEG@@"))
+        return f"译({message.strip()})"
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", fake_chat)
+    monkeypatch.setattr(translate_service.settings, "translate_segment_max_chars", 300)
+
+    source = "START " + " ".join(f"word{i}" for i in range(160)) + " END"
+    ir = [Paragraph(runs=[TextRun(text=source)])]
+    translate_service.translate_ir(ir)
+
+    translated = ir[0].runs[0].text
+    assert "START" in translated and "END" in translated
+    assert any(call.count("@@SEG@@") >= 1 for call in calls)
+
+
+def test_translate_ir_recovers_truncated_batch_with_smaller_calls(monkeypatch):
+    calls: list[str] = []
+
+    def fake_chat(message, system_prompt, **kwargs):
+        calls.append(message)
+        if "@@SEG@@" in message:
+            raise LLMOutputTruncatedError("length")
+        return f"译({message.strip()})"
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", fake_chat)
+    ir = [Paragraph(runs=[TextRun(text="First segment."), TextRun(text="Second segment.")])]
+
+    translate_service.translate_ir(ir)
+
+    assert ir[0].runs[0].text == "译(First segment.)"
+    assert ir[0].runs[1].text == "译(Second segment.)"
+    assert len(calls) == 3
+
+
+def test_translate_ir_never_silently_publishes_failed_english_chunks(monkeypatch):
+    def fake_chat(message, system_prompt, **kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", fake_chat)
+    ir = [Paragraph(runs=[TextRun(text="This must not be silently left untranslated.")])]
+
+    with pytest.raises(RuntimeError, match="Translation incomplete"):
+        translate_service.translate_ir(ir)

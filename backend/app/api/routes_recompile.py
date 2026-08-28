@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.api.deps import get_current_user
-from app.models.store import ArtifactEntry, require_document_owner, save_document
-from app.services.auth_service import User
+from app.models.store import (
+    DOCUMENTS,
+    ArtifactEntry,
+    persist_record,
+    translated_pdf_filename,
+)
 from app.services.latex_sanitizer import sanitize_latex_body
 from app.services.latex_service import (
     compile_tex_project_with_fallback,
@@ -29,7 +32,10 @@ class RecompileResponse(BaseModel):
     error: str | None = None
 
 
-def _resolve_translated_tex(record) -> Path:
+def _resolve_translated_tex(record_id: str) -> Path:
+    record = DOCUMENTS.get(record_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Document not found")
     if record.translated_tex_path and record.translated_tex_path.exists():
         return record.translated_tex_path
     # Fallback: derive from output dir convention
@@ -42,17 +48,17 @@ def _resolve_translated_tex(record) -> Path:
 
 
 @router.get("/document/{document_id}/tex")
-def get_document_tex(document_id: str, user: User = Depends(get_current_user)) -> dict:
-    record = require_document_owner(document_id, user.id)
-    tex_path = _resolve_translated_tex(record)
+def get_document_tex(document_id: str) -> dict:
+    tex_path = _resolve_translated_tex(document_id)
     return {"tex_content": tex_path.read_text(encoding="utf-8", errors="ignore")}
 
 
 def _ensure_artifact(record, name: str, kind: str, path: Path) -> None:
-    rel = path.relative_to(path.parents[1]) if len(path.parents) >= 2 else Path(path.name)
     url = f"/data/outputs/{record.document_id}/{path.name}"
     for existing in record.artifacts:
-        if existing.name == name:
+        if existing.name == name or existing.kind == kind:
+            existing.name = name
+            existing.kind = kind
             existing.path = str(path)
             existing.url = url
             return
@@ -60,13 +66,12 @@ def _ensure_artifact(record, name: str, kind: str, path: Path) -> None:
 
 
 @router.post("/document/{document_id}/tex", response_model=RecompileResponse)
-def recompile_document_tex(
-    document_id: str,
-    payload: RecompileRequest,
-    user: User = Depends(get_current_user),
-) -> RecompileResponse:
-    record = require_document_owner(document_id, user.id)
-    tex_path = _resolve_translated_tex(record)
+def recompile_document_tex(document_id: str, payload: RecompileRequest) -> RecompileResponse:
+    record = DOCUMENTS.get(document_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    tex_path = _resolve_translated_tex(document_id)
     output_dir = tex_path.parent
 
     sanitized = sanitize_latex_body(payload.tex_content)
@@ -90,15 +95,18 @@ def recompile_document_tex(
         record.logs.append(f"Manual recompile failed: {exc}")
         return RecompileResponse(ok=False, error=str(exc))
 
-    translated_out = output_dir / "translated.pdf"
+    translated_name = translated_pdf_filename(record.source_filename)
+    translated_out = output_dir / translated_name
     copy_pdf_to_output(result.pdf_path, translated_out)
-    record.translated_pdf_url = f"/data/outputs/{record.document_id}/translated.pdf"
+    if result.pdf_path.resolve() != translated_out.resolve():
+        result.pdf_path.unlink(missing_ok=True)
+    record.translated_pdf_url = f"/data/outputs/{record.document_id}/{translated_name}"
     record.translated_tex_path = tex_path
     record.last_compile_warning = result.warning
-    _ensure_artifact(record, "translated.pdf", "translated_pdf", translated_out)
+    _ensure_artifact(record, translated_name, "translated_pdf", translated_out)
     _ensure_artifact(record, "translated.tex", "translated_tex", tex_path)
     record.logs.append("Manual recompile succeeded" + (f" (warning: {result.warning})" if result.warning else ""))
-    save_document(record)
+    persist_record(record)
 
     return RecompileResponse(
         ok=True,

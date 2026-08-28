@@ -10,6 +10,10 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+class LLMOutputTruncatedError(RuntimeError):
+    """Raised when the provider reports that its output token limit was hit."""
+
+
 class _TokenBucket:
     """Simple thread-safe token bucket for global request rate limiting.
 
@@ -84,7 +88,13 @@ class OpenAICompatClient:
                     ],
                     temperature=0.2,
                 )
-                return response.choices[0].message.content or ""
+                choice = response.choices[0]
+                finish_reason = getattr(choice, "finish_reason", None)
+                if finish_reason == "length":
+                    raise LLMOutputTruncatedError(
+                        "LLM response was cut off because the output token limit was reached"
+                    )
+                return choice.message.content or ""
             except Exception as exc:
                 is_last_attempt = attempt >= max_retries
                 if is_last_attempt or not _is_retryable_error(exc):
@@ -124,6 +134,10 @@ def _retry_after_seconds(exc: Exception) -> float | None:
 
 
 def _is_retryable_error(exc: Exception) -> bool:
+    # Repeating an identical over-sized request will be truncated again. The
+    # translation layer catches this exception and retries smaller sub-chunks.
+    if isinstance(exc, LLMOutputTruncatedError):
+        return False
     status_code = getattr(exc, "status_code", None)
     if status_code == 429:
         return True

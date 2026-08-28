@@ -7,11 +7,12 @@ from pathlib import Path
 from app.core.config import settings
 from app.services.latex_sanitizer import sanitize_latex_body
 from app.services.mineru_layout import (
-
+    Author,
     Block,
     DisplayMath,
     Image,
     InlineMath,
+    ListBlock,
     Paragraph,
     Table,
     TextRun,
@@ -87,9 +88,9 @@ def _markdown_to_latex_fallback(text: str) -> str:
 class LatexCompileResult:
     """Outcome of a (possibly fallback) LaTeX compilation.
 
-    `warning` is set when the strict pass failed but the lenient `-f` pass
-    still produced a PDF; it contains the original strict-mode error detail
-    so the UI can surface it without aborting the pipeline.
+    `warning` is set when the strict pass failed but a successful lenient
+    `-f` pass produced a PDF; it contains the original strict-mode error
+    detail so the UI can surface it without aborting the pipeline.
     """
 
     def __init__(self, pdf_path: Path, warning: str | None = None) -> None:
@@ -115,18 +116,30 @@ def _run_latexmk(tex_path: Path, output_dir: Path, *, force: bool) -> subprocess
         cwd=str(tex_path.parent),
         capture_output=True,
         text=True,
+        # latexmk/xelatex emit UTF-8 (e.g. Chinese from ctex, CJK filenames,
+        # echoed source lines in warnings). The Windows default locale is GBK,
+        # which crashes subprocess' reader thread with UnicodeDecodeError and
+        # yields empty error output. Pin UTF-8 and tolerate stray bytes.
+        encoding="utf-8",
+        errors="replace",
     )
 
 
 def compile_tex_project_with_fallback(tex_path: Path, output_dir: Path) -> LatexCompileResult:
-    """Compile with strict mode first; if it fails, retry with `-f` so a PDF
-    is still produced when possible. The strict-mode error is returned as a
-    warning rather than raised, so callers can record it without aborting.
+    """Compile with strict mode first; if it fails, retry with `-f`.
+
+    A lenient pass is accepted only when latexmk exits successfully and the
+    expected PDF exists. XeLaTeX can write an incomplete PDF before returning
+    an error, and treating that artifact as success truncates whole papers.
     """
     tex_path = tex_path.resolve()
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     expected_pdf = output_dir / (tex_path.stem + ".pdf")
+
+    # Never let a stale or partially written PDF from an earlier failed pass
+    # masquerade as the result of this compile attempt.
+    expected_pdf.unlink(missing_ok=True)
 
     strict = _run_latexmk(tex_path, output_dir, force=False)
     if strict.returncode == 0 and expected_pdf.exists():
@@ -138,8 +151,11 @@ def compile_tex_project_with_fallback(tex_path: Path, output_dir: Path) -> Latex
     log_path = output_dir / f"{tex_path.stem}.log"
     logger.warning("latexmk strict pass failed (rc=%s); retrying with -f", strict.returncode)
 
+    # A failed strict XeLaTeX pass may already have emitted a truncated PDF.
+    # Remove it so only a fresh, successful lenient pass can satisfy the gate.
+    expected_pdf.unlink(missing_ok=True)
     lenient = _run_latexmk(tex_path, output_dir, force=True)
-    if expected_pdf.exists():
+    if lenient.returncode == 0 and expected_pdf.exists():
         warning = (
             f"LaTeX strict compile failed but a PDF was produced via -f. "
             f"log={log_path}. strict_details={strict_detail}"
@@ -209,11 +225,12 @@ def copy_pdf_to_output(source_pdf: Path, output_pdf: Path) -> None:
 # IR-based rendering (preferred path for MinerU structured output)
 # ---------------------------------------------------------------------------
 
-_TEX_DOCUMENT_TEMPLATE = """\\documentclass[12pt]{{article}}
+_TEX_DOCUMENT_TEMPLATE = """\\documentclass[{documentclass_opts}]{{article}}
 \\usepackage[UTF8]{{ctex}}
-\\usepackage{{amsmath,amssymb,amsfonts}}
+\\usepackage{{amsmath,amssymb,amsfonts,mathrsfs}}
 \\usepackage{{graphicx}}
 \\usepackage{{float}}
+\\usepackage{{caption}}
 \\usepackage{{hyperref}}
 \\graphicspath{{{{./images/}}}}
 \\begin{{document}}
@@ -238,8 +255,12 @@ def _normalize_image_path(rel_path: str) -> str:
 
 
 def _render_paragraph(paragraph: Paragraph) -> str:
+    return _render_runs(paragraph.runs)
+
+
+def _render_runs(runs: list[TextRun | InlineMath]) -> str:
     parts: list[str] = []
-    for run in paragraph.runs:
+    for run in runs:
         if isinstance(run, TextRun):
             text = run.text
             if not text:
@@ -253,30 +274,125 @@ def _render_paragraph(paragraph: Paragraph) -> str:
     return rendered
 
 
+def _render_list(block: ListBlock) -> str:
+    rendered_items = [_render_runs(item) for item in block.items]
+    rendered_items = [item for item in rendered_items if item]
+    if not rendered_items:
+        return ""
+
+    # Reference entries already carry labels such as ``[12]``. Rendering
+    # those as an enumerate environment would duplicate/re-number labels, so
+    # preserve them as consecutive paragraphs. Other MinerU list types use a
+    # normal LaTeX list environment.
+    if block.list_type == "reference_list":
+        return "\n\n".join(f"\\noindent {item}\\par" for item in rendered_items)
+
+    ordered = "ordered" in block.list_type or "number" in block.list_type
+    environment = "enumerate" if ordered else "itemize"
+    items = "\n".join(f"  \\item {item}" for item in rendered_items)
+    return f"\\begin{{{environment}}}\n{items}\n\\end{{{environment}}}"
+
+
 def _render_image(block: Image) -> str:
     rel = _normalize_image_path(block.rel_path)
     if not rel:
         return ""
-    caption = _escape_latex_text(block.caption) if block.caption else ""
-    caption_line = f"\\caption{{{caption}}}\n" if caption else ""
+    caption = block.caption
+    caption = _escape_latex_text(caption) if caption else ""
+    caption_line = f"\\caption*{{{caption}}}\n" if caption else ""
     return (
         "\\begin{figure}[H]\n"
         "  \\centering\n"
-        f"  \\includegraphics[width=0.85\\linewidth]{{{rel}}}\n"
+        f"  \\includegraphics[width=0.90\\linewidth,height=0.68\\textheight,keepaspectratio]{{{rel}}}\n"
         f"  {caption_line}"
         "\\end{figure}"
     )
 
 
+_GROUP_CAPTION_RE = re.compile(
+    r"(?P<caption>(?:Figure|Fig\.?|图)\s*\d+\s*[:：].*)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _split_group_caption(caption: str) -> tuple[str, str]:
+    """Separate a panel caption from the overall figure caption."""
+    match = _GROUP_CAPTION_RE.search(caption)
+    if not match:
+        return caption.strip(), ""
+    panel = caption[:match.start()].strip()
+    return panel, match.group("caption").strip()
+
+
+def _images_share_source_row(left: Image, right: Image) -> bool:
+    """Whether adjacent MinerU image/chart blocks form one panel row."""
+    if left.page_index < 0 or left.page_index != right.page_index:
+        return False
+    if left.bbox is None or right.bbox is None:
+        return False
+    lx0, ly0, lx1, ly1 = left.bbox
+    rx0, ry0, rx1, ry1 = right.bbox
+    overlap = min(ly1, ry1) - max(ly0, ry0)
+    min_height = min(ly1 - ly0, ry1 - ry0)
+    if overlap <= 0 or overlap / min_height < 0.60:
+        return False
+    # Panels should be laid out left-to-right and close enough to plausibly
+    # belong to one figure rather than unrelated page decorations.
+    gap = rx0 - lx1
+    max_width = max(lx1 - lx0, rx1 - rx0)
+    return gap >= -5 and gap <= max_width * 0.35
+
+
+def _render_image_group(blocks: list[Image]) -> str:
+    """Restore a MinerU-split multi-panel figure as one LaTeX figure."""
+    if len(blocks) == 1:
+        return _render_image(blocks[0])
+
+    width = 0.48 if len(blocks) == 2 else 0.31
+    panels: list[str] = []
+    overall_caption = ""
+    for block in blocks:
+        rel = _normalize_image_path(block.rel_path)
+        if not rel:
+            continue
+        panel_caption, group_caption = _split_group_caption(block.caption)
+        if group_caption:
+            overall_caption = group_caption
+        caption_line = ""
+        if panel_caption:
+            caption_line = f"    \\caption*{{{_escape_latex_text(panel_caption)}}}\n"
+        panels.append(
+            f"  \\begin{{minipage}}[t]{{{width:.2f}\\linewidth}}\n"
+            "    \\centering\n"
+            f"    \\includegraphics[width=\\linewidth,height=0.52\\textheight,keepaspectratio]{{{rel}}}\n"
+            f"{caption_line}"
+            "  \\end{minipage}"
+        )
+
+    if not panels:
+        return ""
+    caption_line = ""
+    if overall_caption:
+        caption_line = f"\n  \\caption*{{{_escape_latex_text(overall_caption)}}}"
+    return (
+        "\\begin{figure}[H]\n"
+        "  \\centering\n"
+        + "\n  \\hfill\n".join(panels)
+        + caption_line
+        + "\n\\end{figure}"
+    )
+
+
 def _render_table(block: Table) -> str:
     rel = _normalize_image_path(block.rel_path) if block.rel_path else ""
-    caption = _escape_latex_text(block.caption) if block.caption else ""
-    caption_line = f"\\caption{{{caption}}}\n" if caption else ""
+    caption = block.caption
+    caption = _escape_latex_text(caption) if caption else ""
+    caption_line = f"\\caption*{{{caption}}}\n" if caption else ""
     if rel:
         return (
             "\\begin{figure}[H]\n"
             "  \\centering\n"
-            f"  \\includegraphics[width=0.85\\linewidth]{{{rel}}}\n"
+            f"  \\includegraphics[width=0.90\\linewidth,height=0.68\\textheight,keepaspectratio]{{{rel}}}\n"
             f"  {caption_line}"
             "\\end{figure}"
         )
@@ -284,26 +400,55 @@ def _render_table(block: Table) -> str:
     return ""
 
 
+def _render_author(text: str) -> str:
+    """Render an author/affiliation string, converting `<sup>`/`<sub>` HTML to
+    LaTeX while escaping the surrounding plain text (but not the commands)."""
+    def _esc(value: str) -> str:
+        return _escape_latex_text(value)
+
+    pattern = re.compile(r"<(sup|sub)>(.*?)</\1>", re.IGNORECASE)
+    parts: list[str] = []
+    last = 0
+    for match in pattern.finditer(text):
+        parts.append(_esc(text[last:match.start()]))
+        tag, inner = match.group(1).lower(), match.group(2)
+        command = "textsuperscript" if tag == "sup" else "textsubscript"
+        parts.append(f"\\{command}{{{_esc(inner.strip())}}}")
+        last = match.end()
+    parts.append(_esc(text[last:]))
+    return re.sub(r"<[^>]+>", "", "".join(parts)).strip()
+
+
 def render_ir_to_tex(
     ir: list[Block],
     title: str | None = None,
+    authors: str | None = None,
+    two_column: bool = False,
 ) -> str:
     """Render an IR list as a complete, compilable LaTeX document."""
     rendered_blocks: list[str] = []
-    title_block = ""
-    title_consumed = False
+    paper_title: str | None = None
+    paper_authors: str | None = authors
 
-    for block in ir:
+    index = 0
+    while index < len(ir):
+        block = ir[index]
         if isinstance(block, Title):
             text_escaped = _escape_latex_text(block.text)
-            if not title_consumed and block.level <= 1 and not title and not title_block:
-                title_block = f"\\title{{{text_escaped}}}\n\\maketitle\n\n"
-                title_consumed = True
-                continue
-            command = _level_to_section_command(block.level)
-            rendered_blocks.append(f"{command}{{{text_escaped}}}")
+            if paper_title is None and block.level <= 1:
+                paper_title = block.text
+            else:
+                command = _level_to_section_command(block.level)
+                rendered_blocks.append(f"{command}{{{text_escaped}}}")
+        elif isinstance(block, Author):
+            if paper_authors is None:
+                paper_authors = block.text
         elif isinstance(block, Paragraph):
             rendered = _render_paragraph(block)
+            if rendered:
+                rendered_blocks.append(rendered)
+        elif isinstance(block, ListBlock):
+            rendered = _render_list(block)
             if rendered:
                 rendered_blocks.append(rendered)
         elif isinstance(block, DisplayMath):
@@ -311,19 +456,41 @@ def render_ir_to_tex(
             if latex:
                 rendered_blocks.append(f"\\[\n{latex}\n\\]")
         elif isinstance(block, Image):
-            rendered = _render_image(block)
+            image_group = [block]
+            cursor = index + 1
+            while (
+                cursor < len(ir)
+                and isinstance(ir[cursor], Image)
+                and _images_share_source_row(image_group[-1], ir[cursor])
+            ):
+                image_group.append(ir[cursor])
+                cursor += 1
+            rendered = _render_image_group(image_group)
             if rendered:
                 rendered_blocks.append(rendered)
+            index = cursor - 1
         elif isinstance(block, Table):
             rendered = _render_table(block)
             if rendered:
                 rendered_blocks.append(rendered)
 
-    if title and title.strip() and not title_block:
-        title_block = f"\\title{{{_escape_latex_text(title.strip())}}}\n\\maketitle\n\n"
+        index += 1
+
+    if title and title.strip():
+        paper_title = paper_title or title.strip()
+
+    title_block = ""
+    if paper_title:
+        title_block = f"\\title{{{_escape_latex_text(paper_title.strip())}}}\n"
+        if paper_authors and paper_authors.strip():
+            title_block += f"\\author{{{_render_author(paper_authors)}}}\n"
+        title_block += "\\date{}\n\\maketitle\n\n"
 
     body = "\n\n".join(rendered_blocks).strip() + "\n"
-    return _TEX_DOCUMENT_TEMPLATE.format(title_block=title_block, body=body)
+    documentclass_opts = "10pt,twocolumn" if two_column else "12pt"
+    return _TEX_DOCUMENT_TEMPLATE.format(
+        documentclass_opts=documentclass_opts, title_block=title_block, body=body
+    )
 
 
 def create_translated_tex_from_ir(
@@ -331,10 +498,14 @@ def create_translated_tex_from_ir(
     out_tex_path: Path,
     images_src_dir: Path | None = None,
     title: str | None = None,
+    authors: str | None = None,
+    two_column: bool = False,
 ) -> None:
     """Write `translated.tex` from an IR list and copy `images/` next to it."""
     out_tex_path.parent.mkdir(parents=True, exist_ok=True)
-    tex = render_ir_to_tex(ir, title=title)
+    tex = render_ir_to_tex(
+        ir, title=title, authors=authors, two_column=two_column
+    )
     tex = sanitize_latex_body(tex)
     out_tex_path.write_text(tex, encoding="utf-8")
 
