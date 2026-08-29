@@ -6,7 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.api.deps import get_current_user
-from app.models.store import ArtifactEntry, require_document_owner, save_document
+from app.models.store import (
+    ArtifactEntry,
+    require_document_owner,
+    save_document,
+    translated_pdf_filename,
+)
 from app.services.auth_service import User
 from app.services.latex_sanitizer import sanitize_latex_body
 from app.services.latex_service import (
@@ -49,10 +54,11 @@ def get_document_tex(document_id: str, user: User = Depends(get_current_user)) -
 
 
 def _ensure_artifact(record, name: str, kind: str, path: Path) -> None:
-    rel = path.relative_to(path.parents[1]) if len(path.parents) >= 2 else Path(path.name)
     url = f"/data/outputs/{record.document_id}/{path.name}"
     for existing in record.artifacts:
-        if existing.name == name:
+        if existing.name == name or existing.kind == kind:
+            existing.name = name
+            existing.kind = kind
             existing.path = str(path)
             existing.url = url
             return
@@ -90,12 +96,15 @@ def recompile_document_tex(
         record.logs.append(f"Manual recompile failed: {exc}")
         return RecompileResponse(ok=False, error=str(exc))
 
-    translated_out = output_dir / "translated.pdf"
+    translated_name = translated_pdf_filename(record.source_filename)
+    translated_out = output_dir / translated_name
     copy_pdf_to_output(result.pdf_path, translated_out)
-    record.translated_pdf_url = f"/data/outputs/{record.document_id}/translated.pdf"
+    if result.pdf_path.resolve() != translated_out.resolve():
+        result.pdf_path.unlink(missing_ok=True)
+    record.translated_pdf_url = f"/data/outputs/{record.document_id}/{translated_name}"
     record.translated_tex_path = tex_path
     record.last_compile_warning = result.warning
-    _ensure_artifact(record, "translated.pdf", "translated_pdf", translated_out)
+    _ensure_artifact(record, translated_name, "translated_pdf", translated_out)
     _ensure_artifact(record, "translated.tex", "translated_tex", tex_path)
     record.logs.append("Manual recompile succeeded" + (f" (warning: {result.warning})" if result.warning else ""))
     save_document(record)

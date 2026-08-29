@@ -24,7 +24,7 @@ def _run_pipeline(record_id: str) -> None:
 async def upload(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    vision_check_enabled: bool = Form(True),
+    vision_check_enabled: bool = Form(False),
     vision_check_mode: str = Form("auto"),
     user: User = Depends(get_current_user),
 ) -> UploadResponse:
