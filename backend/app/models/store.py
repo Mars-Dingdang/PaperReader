@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -117,6 +118,31 @@ class ProjectRecord:
 
 DOCUMENTS: dict[str, DocumentRecord] = {}
 PROJECTS: dict[str, ProjectRecord] = {}
+
+
+def normalized_source_filename(name: str, original_name: str = "document.pdf") -> str:
+    """Return a safe display filename while preserving the source file type."""
+    raw = (name or "").strip()
+    if not raw or Path(raw).name != raw or "/" in raw or "\\" in raw:
+        raise ValueError("invalid document name")
+    original_suffix = Path(original_name).suffix.lower()
+    suffix = Path(raw).suffix.lower()
+    stem = Path(raw).stem if suffix else raw
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", stem).strip(" .")
+    if not stem:
+        raise ValueError("invalid document name")
+    if original_suffix in {".pdf", ".tex"}:
+        suffix = original_suffix
+    elif not suffix:
+        suffix = ".pdf"
+    return f"{stem[:120]}{suffix}"
+
+
+def translated_pdf_filename(source_filename: str) -> str:
+    """Return the user-facing translated PDF filename for a source document."""
+    stem = Path(source_filename or "document.pdf").stem
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", stem).strip(" .") or "document"
+    return f"{stem[:120]}_Chinese_ver.pdf"
 
 
 def _serialize_items(items: list) -> str:
