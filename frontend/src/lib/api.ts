@@ -99,6 +99,23 @@ export type RecompileResult = {
   error?: string | null
 }
 
+export type ChatMessage = {
+  message_id: string
+  role: 'user' | 'assistant'
+  content: string
+  created_at: string
+}
+
+export type ChatSession = {
+  session_id: string
+  scope: 'document' | 'library'
+  document_ids: string[]
+  title: string
+  created_at: string
+  updated_at: string
+  messages: ChatMessage[]
+}
+
 const BACKEND = (import.meta as any).env?.VITE_BACKEND_URL || 'http://localhost:8000'
 
 async function apiFetch(path: string, init: RequestInit = {}, expectJson = true) {
@@ -194,7 +211,7 @@ export type UploadOptions = {
 export async function uploadFile(file: File, options: UploadOptions = {}): Promise<UploadResult> {
   const form = new FormData()
   form.append('file', file)
-  form.append('vision_check_enabled', String(options.visionCheckEnabled ?? true))
+  form.append('vision_check_enabled', String(options.visionCheckEnabled ?? false))
   form.append('vision_check_mode', options.visionCheckMode ?? 'auto')
   return apiFetch('/api/upload', { method: 'POST', body: form })
 }
@@ -211,18 +228,79 @@ export async function deleteDocument(documentId: string): Promise<void> {
   await apiFetch(`/api/document/${documentId}`, { method: 'DELETE' })
 }
 
+export async function renameDocument(documentId: string, name: string): Promise<DocumentStatus> {
+  return apiFetch(`/api/document/${documentId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name })
+  })
+}
+
 export async function sendChat(payload: {
-  document_id: string
+  document_id?: string
+  document_ids?: string[]
+  scope?: 'document' | 'library'
+  session_id?: string
   message: string
   override_api_key?: string
   override_base_url?: string
   override_model?: string
-}): Promise<{ answer: string }> {
+}): Promise<{ answer: string; session_id: string }> {
   return apiFetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   })
+}
+
+export async function listChatSessions(
+  scope: 'document' | 'library',
+  documentId?: string
+): Promise<ChatSession[]> {
+  const params = new URLSearchParams({ scope })
+  if (documentId) params.set('document_id', documentId)
+  return apiFetch(`/api/chat/sessions?${params.toString()}`)
+}
+
+export async function createChatSession(payload: {
+  scope: 'document' | 'library'
+  document_ids: string[]
+  title?: string
+}): Promise<ChatSession> {
+  return apiFetch('/api/chat/sessions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+}
+
+export async function getChatSession(sessionId: string): Promise<ChatSession> {
+  return apiFetch(`/api/chat/sessions/${sessionId}`)
+}
+
+export async function locateCounterpart(payload: {
+  documentId: string
+  source_side: 'original' | 'translated'
+  selected_text: string
+  source_page?: number
+  source_page_count?: number
+}): Promise<{ target_text: string; position_ratio: number; confidence: number; alignment_method: string }> {
+  return apiFetch(`/api/document/${payload.documentId}/locate-counterpart`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      source_side: payload.source_side,
+      selected_text: payload.selected_text,
+      source_page: payload.source_page,
+      source_page_count: payload.source_page_count
+    })
+  })
+}
+
+export function translatedPdfName(sourceFilename: string): string {
+  const leaf = (sourceFilename || 'document.pdf').split(/[\\/]/).pop() || 'document.pdf'
+  const stem = leaf.replace(/\.[^.]+$/, '') || 'document'
+  return `${stem}_Chinese_ver.pdf`
 }
 
 export async function createProject(name?: string): Promise<{ project_id: string; name: string }> {
@@ -269,7 +347,7 @@ export async function buildProject(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       main_tex: mainTex,
-      vision_check_enabled: options.visionCheckEnabled ?? true,
+      vision_check_enabled: options.visionCheckEnabled ?? false,
       vision_check_mode: options.visionCheckMode ?? 'auto'
     })
   })
