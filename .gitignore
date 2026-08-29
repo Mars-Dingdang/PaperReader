@@ -3,16 +3,6 @@
 **/__pycache__/
 **/*.pyc
 .vscode/
-frontend/node_modules/
-frontend/dist/
-build/
-dist/
-release/
-tmp/
-pr-packages/
-*.tsbuildinfo
-PaperReader-error.log
-config.env
 data/
 data/outputs/
 data/uploads/

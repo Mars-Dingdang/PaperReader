@@ -22,7 +22,7 @@ from app.models.store import DocumentRecord, StageEntry
 # stage_key -> (label, weight)
 PDF_STAGES: list[tuple[str, str, float]] = [
     ("upload", "接收文件", 1.0),
-    ("parse", "解析 PDF", 45.0),
+    ("mineru", "MinerU 解析", 45.0),
     ("clean", "清洗与对齐", 3.0),
     ("vision_check", "视觉模型校验", 10.0),
     ("translate", "翻译", 35.0),
@@ -151,30 +151,6 @@ def _recompute_eta(record: DocumentRecord) -> None:
         else:
             remaining += s.weight
     record.eta_seconds = int(remaining) if has_history or record.stages else None
-
-
-def set_stage_progress(
-    record: DocumentRecord, stage_key: str, fraction: float, label: str | None = None
-) -> None:
-    """Advance the overall progress bar *within* a running stage.
-
-    The default progress only moves when a whole stage transitions to ``done``,
-    which leaves the bar pinned near 0% during long stages (e.g. a large PDF
-    uploading to MinerU for ~40s). Callers inside a stage body pass a ``fraction``
-    in [0, 1] to reflect sub-stage progress so the bar keeps moving and the label
-    can explain what is happening.
-    """
-    entry = next((s for s in record.stages if s.key == stage_key), None)
-    if entry is None:
-        return
-    fraction = max(0.0, min(1.0, float(fraction)))
-    total_w = _total_weight(record)
-    done_w = _completed_weight(record)
-    running_w = entry.weight * fraction if entry.status == "running" else 0.0
-    record.progress = int(round(100 * (done_w + running_w) / total_w))
-    if label:
-        entry.label = label
-        record.current_stage_label = label
 
 
 @contextmanager

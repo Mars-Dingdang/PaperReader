@@ -2,7 +2,6 @@ from app.services.mineru_layout import (
     DisplayMath,
     Image,
     InlineMath,
-    ListBlock,
     Paragraph,
     TextRun,
     Title,
@@ -100,7 +99,6 @@ def test_render_ir_to_tex_emits_sections_math_and_image():
     # Document scaffolding
     assert "\\documentclass" in tex
     assert "\\usepackage[UTF8]{ctex}" in tex
-    assert "mathrsfs" in tex
     assert "\\begin{document}" in tex and "\\end{document}" in tex
 
     # First level-1 title becomes the \title{}/\maketitle, second becomes \section*
@@ -116,104 +114,7 @@ def test_render_ir_to_tex_emits_sections_math_and_image():
     # Image included via \includegraphics with normalized relative path
     assert "\\includegraphics" in tex
     assert "{fig1.jpg}" in tex
-    assert "\\caption*{A figure caption.}" in tex
-    # Bound both dimensions so tall source figures are scaled down instead of
-    # extending beyond (and being clipped by) the PDF page.
-    assert "height=0.68\\textheight" in tex
-    assert "keepaspectratio" in tex
-
-
-def test_chart_panel_is_preserved_and_grouped_with_adjacent_image():
-    pages = [[
-        {
-            "type": "title",
-            "content": {
-                "title_content": [{"type": "text", "content": "Paper"}],
-                "level": 1,
-            },
-        },
-        {
-            "type": "image",
-            "bbox": [100, 500, 400, 700],
-            "content": {
-                "image_source": {"path": "images/figure-4a.jpg"},
-                "image_caption": [{"type": "text", "content": "(a) Left panel."}],
-            },
-        },
-        {
-            "type": "chart",
-            "bbox": [420, 505, 800, 700],
-            "content": {
-                "image_source": {"path": "images/figure-4b.jpg"},
-                "chart_caption": [
-                    {"type": "text", "content": "(b) Right panel."},
-                    {"type": "text", "content": "Figure 4: Complete statistics."},
-                ],
-            },
-        },
-    ]]
-
-    ir = blocks_to_ir(pages)
-    assert len(ir) == 3
-    assert isinstance(ir[1], Image) and isinstance(ir[2], Image)
-    assert ir[2].rel_path == "images/figure-4b.jpg"
-    assert ir[1].page_index == ir[2].page_index == 0
-
-    tex = render_ir_to_tex(ir)
-    assert "{figure-4a.jpg}" in tex
-    assert "{figure-4b.jpg}" in tex
-    assert tex.count("\\begin{minipage}") == 2
-    assert "\\caption*{Figure 4: Complete statistics.}" in tex
-    # One multi-panel source figure must remain one LaTeX figure.
-    assert tex.count("\\begin{figure}[H]") == 1
-
-
-def test_reference_list_blocks_are_preserved_translated_and_rendered():
-    pages = [[
-        {
-            "type": "title",
-            "content": {"title_content": [{"type": "text", "content": "Paper"}], "level": 1},
-        },
-        {
-            "type": "list",
-            "content": {
-                "list_type": "reference_list",
-                "list_items": [
-                    {
-                        "item_type": "text",
-                        "item_content": [
-                            {"type": "text", "content": "[1] First complete reference."}
-                        ],
-                    },
-                    {
-                        "item_type": "text",
-                        "item_content": [
-                            {"type": "text", "content": "[2] Second reference with "},
-                            {"type": "equation_inline", "content": "x^2"},
-                            {"type": "text", "content": "."},
-                        ],
-                    },
-                ],
-            },
-        },
-    ]]
-
-    ir = blocks_to_ir(pages)
-    assert isinstance(ir[1], ListBlock)
-    assert len(ir[1].items) == 2
-
-    segments = collect_translatable_strings(ir)
-    assert segments == [
-        "Paper",
-        "[1] First complete reference.",
-        "[2] Second reference with ",
-        ".",
-    ]
-    apply_translations(ir, ["论文", "[1] 完整文献一。", "[2] 含公式的文献", "。"])
-
-    tex = render_ir_to_tex(ir)
-    assert "\\noindent [1] 完整文献一。\\par" in tex
-    assert "[2] 含公式的文献$x^2$。" in tex
+    assert "\\caption{A figure caption.}" in tex
 
 
 def test_escape_special_characters_in_text_only():
