@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from pydantic import Field
@@ -6,7 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(Path(__file__).resolve().parents[3] / ".env"),
+        env_file=os.environ.get("PAPERREADER_ENV_FILE")
+        or str(Path(__file__).resolve().parents[3] / ".env"),
         case_sensitive=False,
         extra="ignore",
     )
