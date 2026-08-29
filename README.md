@@ -132,6 +132,7 @@ cp .env.example .env
 - `TRANSLATE_MAX_RETRIES` (default `5`) — retry budget per LLM call; uses jittered exponential backoff and respects `Retry-After`.
 - `LLM_RATE_LIMIT_RPS` (default `4`) — global token-bucket cap on LLM requests per second across all worker threads. Set to `0` to disable. Tune below the provider/key's published RPM to avoid 429s. Note: this limiter is per uvicorn process; if you scale to N workers, the effective limit becomes `N × LLM_RATE_LIMIT_RPS`.
 - `TRANSLATE_BATCH_MAX_CHARS` (default `6000`) — max joined character length per IR batch request. Larger values amortize round-trip latency at the cost of larger per-call payloads.
+- `TRANSLATE_SEGMENT_MAX_CHARS` (default `2000`) — hard cap for any single prose segment. Long MinerU paragraphs are split and reassembled so a model output limit cannot cut off the latter half.
 - `VISION_MODEL` (default `GLM-4.5V`) — multimodal model used by the Phase D vision check. Must be a vision-capable model accessible via the same OpenAI-compatible endpoint as `OPENAI_BASE_URL` (e.g. `GLM-4.5V`, `GLM-4.6V`, `Qwen3-VL-30B-A3B-Instruct`, `Qwen3-VL-235B-A22B-Instruct`).
 - `VISION_CHECK_ENABLED` (default `true`), `VISION_CHECK_MODE` (`auto` | `manual`), `VISION_CHECK_MAX_PAGES` (default `8`) — toggle/limit Phase D check.
 - `LATEXMK_PATH` — absolute path to `latexmk` if not on `PATH`.
