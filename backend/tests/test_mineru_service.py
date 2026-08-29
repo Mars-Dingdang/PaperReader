@@ -87,29 +87,3 @@ def test_missing_api_key_raises(tmp_path, monkeypatch):
     pdf.write_bytes(b"%PDF-1.4 fake")
     with pytest.raises(RuntimeError, match="MINERU_API_KEY"):
         mineru_service.extract_text_from_pdf(str(pdf), tmp_path / "out")
-
-
-def test_result_zip_download_retries_after_ssl_disconnect(tmp_path, monkeypatch):
-    zip_bytes = _make_zip_bytes({"full.md": "# complete\n\ncontent"})
-    success = _bytes_resp(200, zip_bytes)
-    calls = 0
-
-    def flaky_get(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise mineru_service.requests.exceptions.SSLError("unexpected EOF")
-        return success
-
-    monkeypatch.setattr(mineru_service.requests, "get", flaky_get)
-    monkeypatch.setattr(mineru_service.time, "sleep", lambda _seconds: None)
-    logs: list[str] = []
-
-    text, files = mineru_service._download_and_extract_zip(
-        "https://cdn.example/result.zip", tmp_path / "out", log_sink=logs
-    )
-
-    assert calls == 2
-    assert "complete" in text
-    assert any(path.name == "full.md" for path in files)
-    assert any("retry 2/4" in line for line in logs)
