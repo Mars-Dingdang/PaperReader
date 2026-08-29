@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { Document, Page } from 'react-pdf'
 import {
   ChevronLeft,
@@ -20,6 +20,17 @@ type Props = {
   overrideTitle?: string
   onAcceptDrop?: (payload: { url: string; name: string; kind: string }) => void
   onClearOverride?: () => void
+  downloadName?: string
+  counterpartLabel?: string
+  onLocateCounterpart?: (payload: {
+    selectedText: string
+    page: number
+    pageCount: number
+  }) => void
+}
+
+export type PdfPaneHandle = {
+  locateAndHighlight: (payload: { text: string; positionRatio: number }) => Promise<void>
 }
 
 type OutlineItem = {
@@ -30,19 +41,40 @@ type OutlineItem = {
 
 type ViewMode = 'scroll' | 'single'
 
-export function PdfPane({ title, pdfUrl, overrideUrl, overrideTitle, onAcceptDrop, onClearOverride }: Props) {
+export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
+  title,
+  pdfUrl,
+  overrideUrl,
+  overrideTitle,
+  onAcceptDrop,
+  onClearOverride,
+  downloadName,
+  counterpartLabel,
+  onLocateCounterpart,
+}: Props, ref) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const pageRefs = useRef<Array<HTMLDivElement | null>>([])
   const isProgrammaticScrollRef = useRef(false)
+  const pdfDocumentRef = useRef<any>(null)
+  const scaleRef = useRef(1.0)
+  const pinchRef = useRef<{ distance: number; scale: number } | null>(null)
   const [numPages, setNumPages] = useState(0)
   const [pageNumber, setPageNumber] = useState(1)
   const [scale, setScale] = useState(1.0)
+  const [zoomInput, setZoomInput] = useState('100')
   const [containerWidth, setContainerWidth] = useState<number | undefined>(undefined)
   const [outline, setOutline] = useState<OutlineItem[]>([])
   const [outlineOpen, setOutlineOpen] = useState(false)
   const [mode, setMode] = useState<ViewMode>('scroll')
   const [dragOver, setDragOver] = useState(false)
+  const [selectionMenu, setSelectionMenu] = useState<{
+    x: number
+    y: number
+    text: string
+    page: number
+    canClearHighlight: boolean
+  } | null>(null)
 
   const effectiveUrl = overrideUrl || pdfUrl
   const effectiveTitle = overrideUrl ? (overrideTitle || '已覆盖') : title
@@ -52,6 +84,10 @@ export function PdfPane({ title, pdfUrl, overrideUrl, overrideTitle, onAcceptDro
     setOutline([])
     setOutlineOpen(false)
     setNumPages(0)
+    setScale(1.0)
+    setZoomInput('100')
+    scaleRef.current = 1.0
+    pdfDocumentRef.current = null
     pageRefs.current = []
   }, [pdfUrl, overrideUrl])
 
@@ -66,6 +102,76 @@ export function PdfPane({ title, pdfUrl, overrideUrl, overrideTitle, onAcceptDro
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
+
+  useEffect(() => {
+    scaleRef.current = scale
+    setZoomInput(String(Math.round(scale * 100)))
+  }, [scale])
+
+  useEffect(() => {
+    const scroller = scrollRef.current
+    if (!scroller || !effectiveUrl) return
+
+    const clampScale = (value: number) => Math.max(0.4, Math.min(3, Math.round(value * 100) / 100))
+    const zoomAt = (nextScale: number, clientX: number, clientY: number) => {
+      const previous = scaleRef.current
+      const next = clampScale(nextScale)
+      if (Math.abs(previous - next) < 0.005) return
+      const rect = scroller.getBoundingClientRect()
+      const localX = clientX - rect.left
+      const localY = clientY - rect.top
+      const contentX = scroller.scrollLeft + localX
+      const contentY = scroller.scrollTop + localY
+      const ratio = next / previous
+      scaleRef.current = next
+      setScale(next)
+      window.setTimeout(() => {
+        scroller.scrollLeft = contentX * ratio - localX
+        scroller.scrollTop = contentY * ratio - localY
+      }, 40)
+    }
+
+    const onWheel = (event: WheelEvent) => {
+      // Desktop trackpad pinch gestures are exposed as ctrl+wheel by Chromium.
+      if (!event.ctrlKey) return
+      event.preventDefault()
+      event.stopPropagation()
+      const factor = Math.exp(-event.deltaY * 0.0025)
+      zoomAt(scaleRef.current * factor, event.clientX, event.clientY)
+    }
+    const distance = (touches: TouchList) => {
+      const dx = touches[0].clientX - touches[1].clientX
+      const dy = touches[0].clientY - touches[1].clientY
+      return Math.hypot(dx, dy)
+    }
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches.length !== 2) return
+      pinchRef.current = { distance: distance(event.touches), scale: scaleRef.current }
+    }
+    const onTouchMove = (event: TouchEvent) => {
+      if (event.touches.length !== 2 || !pinchRef.current) return
+      event.preventDefault()
+      event.stopPropagation()
+      const midpointX = (event.touches[0].clientX + event.touches[1].clientX) / 2
+      const midpointY = (event.touches[0].clientY + event.touches[1].clientY) / 2
+      const ratio = distance(event.touches) / Math.max(1, pinchRef.current.distance)
+      zoomAt(pinchRef.current.scale * ratio, midpointX, midpointY)
+    }
+    const onTouchEnd = () => { pinchRef.current = null }
+
+    scroller.addEventListener('wheel', onWheel, { passive: false })
+    scroller.addEventListener('touchstart', onTouchStart, { passive: true })
+    scroller.addEventListener('touchmove', onTouchMove, { passive: false })
+    scroller.addEventListener('touchend', onTouchEnd)
+    scroller.addEventListener('touchcancel', onTouchEnd)
+    return () => {
+      scroller.removeEventListener('wheel', onWheel)
+      scroller.removeEventListener('touchstart', onTouchStart)
+      scroller.removeEventListener('touchmove', onTouchMove)
+      scroller.removeEventListener('touchend', onTouchEnd)
+      scroller.removeEventListener('touchcancel', onTouchEnd)
+    }
+  }, [effectiveUrl])
 
   const fileOpts = useMemo(() => (effectiveUrl ? { url: effectiveUrl } : null), [effectiveUrl])
 
@@ -86,6 +192,7 @@ export function PdfPane({ title, pdfUrl, overrideUrl, overrideTitle, onAcceptDro
   }
 
   async function onDocumentLoadSuccess(doc: any) {
+    pdfDocumentRef.current = doc
     setNumPages(doc.numPages)
     pageRefs.current = new Array(doc.numPages).fill(null)
     try {
@@ -114,6 +221,138 @@ export function PdfPane({ title, pdfUrl, overrideUrl, overrideTitle, onAcceptDro
         }, 600)
       }
     }
+  }
+
+  function normalized(value: string): string {
+    return value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '')
+  }
+
+  function clearHighlights() {
+    const pane = containerRef.current
+    if (!pane) return
+    pane.querySelectorAll('.pdf-text-highlight').forEach((node) => node.classList.remove('pdf-text-highlight'))
+    pane.querySelectorAll('.pdf-page-counterpart-highlight').forEach((node) => node.classList.remove('pdf-page-counterpart-highlight'))
+  }
+
+  function commitZoomInput() {
+    const parsed = Number.parseFloat(zoomInput.replace('%', '').trim())
+    if (!Number.isFinite(parsed)) {
+      setZoomInput(String(Math.round(scaleRef.current * 100)))
+      return
+    }
+    const percent = Math.max(40, Math.min(300, Math.round(parsed)))
+    const nextScale = percent / 100
+    scaleRef.current = nextScale
+    setScale(nextScale)
+    setZoomInput(String(percent))
+  }
+
+  function highlightPageText(page: number, query: string) {
+    const pane = containerRef.current
+    const pageElement = pageRefs.current[page - 1]
+    if (!pane || !pageElement) return
+    clearHighlights()
+    const target = normalized(query)
+    const spans = Array.from(
+      pageElement.querySelectorAll<HTMLElement>('.react-pdf__Page__textContent span')
+    )
+    const values = spans.map((node) => normalized(node.textContent || ''))
+    const wantedLength = Math.min(140, target.length)
+    let bestStart = -1
+    let bestEnd = -1
+    let bestPrefix = 0
+
+    // Find one contiguous text-layer span range whose concatenated content
+    // matches the beginning of the aligned target.  Highlighting every small
+    // span that merely occurred somewhere in the paragraph caused unrelated
+    // repeated words/numbers to light up.
+    for (let start = 0; start < values.length; start += 1) {
+      let combined = ''
+      for (let end = start; end < Math.min(values.length, start + 80); end += 1) {
+        combined += values[end]
+        if (!combined) continue
+        const compareLength = Math.min(combined.length, wantedLength)
+        let prefix = 0
+        while (prefix < compareLength && combined[prefix] === target[prefix]) prefix += 1
+        if (prefix > bestPrefix) {
+          bestPrefix = prefix
+          bestStart = start
+          bestEnd = end
+        }
+        if (prefix < Math.min(6, compareLength) || combined.length >= wantedLength) break
+      }
+    }
+
+    const minimumMatch = Math.min(12, target.length)
+    if (bestStart >= 0 && bestPrefix >= minimumMatch) {
+      for (let index = bestStart; index <= bestEnd; index += 1) {
+        spans[index].classList.add('pdf-text-highlight')
+      }
+      return
+    }
+
+    // A title/caption is sometimes emitted as one large span.  Keep a narrow
+    // single-span fallback instead of highlighting unrelated fragments.
+    let fallbackIndex = -1
+    let fallbackLength = 0
+    values.forEach((value, index) => {
+      if (value.length >= 6 && target.includes(value) && value.length > fallbackLength) {
+        fallbackIndex = index
+        fallbackLength = value.length
+      }
+    })
+    if (fallbackIndex >= 0) spans[fallbackIndex].classList.add('pdf-text-highlight')
+    else pageElement.classList.add('pdf-page-counterpart-highlight')
+  }
+
+  useImperativeHandle(ref, () => ({
+    async locateAndHighlight({ text, positionRatio }) {
+      const doc = pdfDocumentRef.current
+      if (!doc || !numPages) return
+      const hint = Math.max(1, Math.min(numPages, Math.round(positionRatio * Math.max(0, numPages - 1)) + 1))
+      const order = Array.from({ length: numPages }, (_, index) => index + 1)
+        .sort((a, b) => Math.abs(a - hint) - Math.abs(b - hint))
+      const target = normalized(text)
+      const needles = [target.slice(0, 120), target.slice(0, 60), target.slice(0, 24)]
+        .filter((item) => item.length >= 6)
+      let found = hint
+      for (const page of order) {
+        try {
+          const pdfPage = await doc.getPage(page)
+          const textContent = await pdfPage.getTextContent()
+          const pageText = normalized(textContent.items.map((item: any) => item.str || '').join(' '))
+          if (needles.some((needle) => pageText.includes(needle))) {
+            found = page
+            break
+          }
+        } catch {}
+      }
+      gotoPage(found)
+      window.setTimeout(() => highlightPageText(found, text), 700)
+    }
+  }))
+
+  function handleTextContextMenu(event: React.MouseEvent) {
+    if (!onLocateCounterpart) return
+    const target = event.target as HTMLElement
+    const highlighted = Boolean(
+      target.closest('.pdf-text-highlight') || target.closest('.pdf-page-counterpart-highlight')
+    )
+    const selection = window.getSelection()
+    const text = selection?.toString().trim() || ''
+    const selectedInPane = Boolean(text && containerRef.current?.contains(selection?.anchorNode ?? null))
+    if (!selectedInPane && !highlighted) return
+    const pageElement = target.closest<HTMLElement>('[data-pdf-page]')
+    const selectedPage = Number(pageElement?.dataset.pdfPage || pageNumber)
+    event.preventDefault()
+    event.stopPropagation()
+    setSelectionMenu({
+      x: event.clientX,
+      y: event.clientY,
+      text: selectedInPane ? text.slice(0, 2000) : '',
+      page: selectedPage,
+      canClearHighlight: highlighted,
+    })
   }
 
   // Track current page in scroll mode by detecting which page is closest to top
@@ -252,9 +491,28 @@ export function PdfPane({ title, pdfUrl, overrideUrl, overrideTitle, onAcceptDro
           <button className="icon-btn" title="缩小" onClick={() => setScale((s) => Math.max(0.4, s - 0.1))}>
             <ZoomOut size={16} />
           </button>
-          <span className="muted small" style={{ minWidth: 38, textAlign: 'center' }}>
-            {Math.round(scale * 100)}%
-          </span>
+          <label className="zoom-input-wrap" title="手动输入缩放比例（40%–300%）">
+            <input
+              className="zoom-input"
+              type="text"
+              inputMode="numeric"
+              aria-label="缩放百分比"
+              value={zoomInput}
+              onChange={(event) => setZoomInput(event.target.value.replace(/[^0-9.%]/g, ''))}
+              onBlur={commitZoomInput}
+              onFocus={(event) => event.currentTarget.select()}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  commitZoomInput()
+                  event.currentTarget.blur()
+                } else if (event.key === 'Escape') {
+                  setZoomInput(String(Math.round(scaleRef.current * 100)))
+                  event.currentTarget.blur()
+                }
+              }}
+            />
+            <span>%</span>
+          </label>
           <button className="icon-btn" title="放大" onClick={() => setScale((s) => Math.min(3, s + 0.1))}>
             <ZoomIn size={16} />
           </button>
@@ -276,7 +534,7 @@ export function PdfPane({ title, pdfUrl, overrideUrl, overrideTitle, onAcceptDro
           >
             <FileText size={16} />
           </button>
-          <a className="icon-btn" title="下载" href={effectiveUrl} download>
+          <a className="icon-btn" title="下载" href={effectiveUrl} download={downloadName || true}>
             <Download size={16} />
           </a>
         </div>
@@ -286,7 +544,7 @@ export function PdfPane({ title, pdfUrl, overrideUrl, overrideTitle, onAcceptDro
         {outlineOpen && outline.length > 0 && (
           <div className="pdf-outline">{renderOutline(outline)}</div>
         )}
-        <div className="pdf-canvas-wrap" ref={scrollRef}>
+        <div className="pdf-canvas-wrap" ref={scrollRef} onContextMenu={handleTextContextMenu}>
           <Document
             file={fileOpts ?? undefined}
             onLoadSuccess={onDocumentLoadSuccess}
@@ -294,13 +552,19 @@ export function PdfPane({ title, pdfUrl, overrideUrl, overrideTitle, onAcceptDro
             error={<div className="muted" style={{ padding: 20 }}>无法加载 PDF</div>}
           >
             {numPages > 0 && mode === 'single' && (
-              <Page
-                pageNumber={pageNumber}
-                scale={scale}
-                width={containerWidth}
-                renderTextLayer
-                renderAnnotationLayer
-              />
+              <div
+                className="pdf-page-wrap"
+                data-pdf-page={pageNumber}
+                ref={(el) => { pageRefs.current[pageNumber - 1] = el }}
+              >
+                <Page
+                  pageNumber={pageNumber}
+                  scale={scale}
+                  width={containerWidth}
+                  renderTextLayer
+                  renderAnnotationLayer
+                />
+              </div>
             )}
             {numPages > 0 && mode === 'scroll' && (
               <div className="pdf-scroll-stack">
@@ -308,6 +572,7 @@ export function PdfPane({ title, pdfUrl, overrideUrl, overrideTitle, onAcceptDro
                   <div
                     key={`page-${i + 1}`}
                     className="pdf-page-wrap"
+                    data-pdf-page={i + 1}
                     ref={(el) => {
                       pageRefs.current[i] = el
                     }}
@@ -327,6 +592,41 @@ export function PdfPane({ title, pdfUrl, overrideUrl, overrideTitle, onAcceptDro
           </Document>
         </div>
       </div>
+      {selectionMenu && (
+        <>
+          <div className="context-menu-overlay" onClick={() => setSelectionMenu(null)} />
+          <div className="context-menu pdf-selection-menu" style={{ top: selectionMenu.y, left: selectionMenu.x }}>
+            {selectionMenu.text && (
+              <button
+                className="context-menu-item"
+                onClick={() => {
+                  const selected = selectionMenu
+                  setSelectionMenu(null)
+                  onLocateCounterpart?.({
+                    selectedText: selected.text,
+                    page: selected.page,
+                    pageCount: numPages,
+                  })
+                }}
+              >
+                跳转到{counterpartLabel || '对应内容'}并高亮
+              </button>
+            )}
+            {selectionMenu.canClearHighlight && (
+              <button
+                className="context-menu-item"
+                onClick={() => {
+                  clearHighlights()
+                  setSelectionMenu(null)
+                  window.getSelection()?.removeAllRanges()
+                }}
+              >
+                清除高亮
+              </button>
+            )}
+          </div>
+        </>
+      )}
     </div>
   )
-}
+})

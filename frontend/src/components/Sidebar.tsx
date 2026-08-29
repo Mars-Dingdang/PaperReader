@@ -12,6 +12,7 @@ import {
   Plus,
   RefreshCw,
   Settings,
+  Sparkles,
   Star,
   Sun,
   Trash2,
@@ -38,7 +39,8 @@ type Props = {
   onUpload: (file: File) => void
   onSelect: (documentId: string) => void
   onToggleFavorite: (documentId: string) => void
-  onDeleteDocument: (documentId: string) => void
+  onDelete: (documentId: string) => void
+  onRename: (documentId: string, name: string) => void
   onCollapse: () => void
   onOpenInPane?: (artifact: ArtifactItem) => void
   onEditTex?: (artifact: ArtifactItem) => void
@@ -49,6 +51,8 @@ type Props = {
   onToggleVision: () => void
   onToggleTheme: () => void
   onRefreshStatus: () => void
+  onOpenLiteratureChat: () => void
+  literatureChatOpen: boolean
 }
 
 function formatSize(bytes: number): string {
@@ -84,7 +88,8 @@ export function Sidebar({
   onUpload,
   onSelect,
   onToggleFavorite,
-  onDeleteDocument,
+  onDelete,
+  onRename,
   onCollapse,
   onOpenInPane,
   onEditTex,
@@ -95,12 +100,15 @@ export function Sidebar({
   onToggleVision,
   onToggleTheme,
   onRefreshStatus,
+  onOpenLiteratureChat,
+  literatureChatOpen,
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [tab, setTab] = useState<Tab>('tasks')
   const [showArtifacts, setShowArtifacts] = useState(true)
   const [showLogs, setShowLogs] = useState(false)
   const [hoverPreview, setHoverPreview] = useState<{ artifact: ArtifactItem; rect: DOMRect } | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ documentId: string; x: number; y: number } | null>(null)
   const hoverTimerRef = useRef<number | null>(null)
 
   useEffect(() => () => {
@@ -123,6 +131,18 @@ export function Sidebar({
           <PanelLeftClose size={18} />
         </button>
       </div>
+
+      <button
+        className={`literature-chat-entry ${literatureChatOpen ? 'active' : ''}`}
+        onClick={onOpenLiteratureChat}
+      >
+        <span className="literature-chat-icon"><Sparkles size={17} /></span>
+        <span>
+          <strong>AI Literature Chat</strong>
+          <small>跨论文检索、比较与讨论</small>
+        </span>
+        <ChevronRight size={14} />
+      </button>
 
       <div className="sidebar-toolbar" role="toolbar" aria-label="工具">
         <button
@@ -221,6 +241,11 @@ export function Sidebar({
                 key={doc.document_id}
                 className={`doc-item ${active ? 'active' : ''}`}
                 onClick={() => onSelect(doc.document_id)}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setContextMenu({ documentId: doc.document_id, x: e.clientX, y: e.clientY })
+                }}
               >
                 <div className="doc-icon">
                   <FileText size={20} />
@@ -248,7 +273,7 @@ export function Sidebar({
                   title="移除历史"
                   onClick={(e) => {
                     e.stopPropagation()
-                    onDeleteDocument(doc.document_id)
+                    onDelete(doc.document_id)
                   }}
                 >
                   <Trash2 size={14} />
@@ -398,6 +423,47 @@ export function Sidebar({
           name={hoverPreview.artifact.name}
           anchorRect={hoverPreview.rect}
         />
+      )}
+
+      {contextMenu && (
+        <>
+          <div
+            className="context-menu-overlay"
+            onClick={() => setContextMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              setContextMenu(null)
+            }}
+          />
+          <div className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
+            <button
+              className="context-menu-item"
+              onClick={() => {
+                const id = contextMenu.documentId
+                const current = documents.find((item) => item.document_id === id)?.source_filename || ''
+                setContextMenu(null)
+                const next = window.prompt('请输入新的文档名', current)
+                if (next && next.trim() && next.trim() !== current) {
+                  onRename(id, next.trim())
+                }
+              }}
+            >
+              <Pencil size={14} />
+              更改文档名
+            </button>
+            <button
+              className="context-menu-item danger"
+              onClick={() => {
+                const id = contextMenu.documentId
+                setContextMenu(null)
+                onDelete(id)
+              }}
+            >
+              <Trash2 size={14} />
+              删除文档
+            </button>
+          </div>
+        </>
       )}
     </aside>
   )

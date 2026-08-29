@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
-import { PanelLeftOpen } from 'lucide-react'
+import { PanelLeftOpen, PanelRightOpen } from 'lucide-react'
 import { ChatPanel } from '../components/ChatPanel'
+import { LiteratureChatPage } from '../components/LiteratureChatPage'
 import { PdfPane } from '../components/PdfPane'
+import type { PdfPaneHandle } from '../components/PdfPane'
 import { ProgressBar } from '../components/ProgressBar'
 import { ProfileModal } from '../components/ProfileModal'
 import { ProjectDrawer } from '../components/ProjectDrawer'
@@ -15,8 +17,10 @@ import {
   getDocumentStatus,
   listDocuments,
   logout,
+  locateCounterpart,
   makeDataUrl,
-  sendChat,
+  renameDocument,
+  translatedPdfName,
   updateSettings,
   uploadFile
 } from '../lib/api'
@@ -46,8 +50,11 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
   const [visionEnabled, setVisionEnabled] = useState(user.settings.vision_enabled)
   const [visionMode, setVisionMode] = useState<UserSettings['vision_mode']>(user.settings.vision_mode)
   const [favorites, setFavorites] = useState<string[]>(user.settings.favorites)
+  const [literatureChatOpen, setLiteratureChatOpen] = useState(false)
 
   const pollTimerRef = useRef<number | null>(null)
+  const originalPaneRef = useRef<PdfPaneHandle | null>(null)
+  const translatedPaneRef = useRef<PdfPaneHandle | null>(null)
 
   useEffect(() => {
     setTheme(user.settings.theme)
@@ -177,6 +184,7 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
     try {
       const result = await uploadFile(file, { visionCheckEnabled: visionEnabled, visionCheckMode: visionMode })
       setActiveId(result.document_id)
+      setLiteratureChatOpen(false)
       await refreshSummaries()
     } catch (e: any) {
       alert(`上传失败：${e?.message ?? String(e)}`)
@@ -196,7 +204,7 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
     )
   }, [])
 
-  const handleDeleteDocument = useCallback(async (docId: string) => {
+  const handleDelete = useCallback(async (docId: string) => {
     if (!window.confirm('删除这条历史记录？对应文件不会从系统默认输出目录移除。')) return
     try {
       await deleteDocument(docId)
@@ -208,10 +216,43 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
       setFavorites((prev) => prev.filter((item) => item !== docId))
       setSummaries((prev) => prev.filter((item) => item.document_id !== docId))
       setActiveId((prev) => (prev === docId ? undefined : prev))
-    } catch (e) {
-      console.error(e)
+    } catch (e: any) {
+      alert(`删除失败：${e?.message ?? String(e)}`)
     }
   }, [])
+
+  const handleRename = useCallback(async (documentId: string, name: string) => {
+    try {
+      const updated = await renameDocument(documentId, name)
+      setDocCache((cache) => ({ ...cache, [documentId]: updated }))
+      await refreshSummaries()
+    } catch (e: any) {
+      alert(`重命名失败：${e?.message ?? String(e)}`)
+    }
+  }, [refreshSummaries])
+
+  const handleLocateCounterpart = useCallback(async (
+    sourceSide: 'original' | 'translated',
+    payload: { selectedText: string; page: number; pageCount: number }
+  ) => {
+    if (!activeId) return
+    try {
+      const located = await locateCounterpart({
+        documentId: activeId,
+        source_side: sourceSide,
+        selected_text: payload.selectedText,
+        source_page: payload.page,
+        source_page_count: payload.pageCount,
+      })
+      const target = sourceSide === 'original' ? translatedPaneRef.current : originalPaneRef.current
+      await target?.locateAndHighlight({
+        text: located.target_text,
+        positionRatio: located.position_ratio,
+      })
+    } catch (e: any) {
+      alert(`未能定位对应内容：${e?.message ?? String(e)}`)
+    }
+  }, [activeId])
 
   const handleOpenInPane = useCallback((artifact: ArtifactItem) => {
     if (!artifact.url) return
@@ -239,6 +280,8 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
     return `原始 · ${activeDoc.source_filename || activeDoc.document_id}`
   }, [activeDoc])
 
+  const translatedName = translatedPdfName(activeDoc?.source_filename || 'document.pdf')
+
   return (
     <div className="app-shell">
       {showSidebar ? (
@@ -256,9 +299,13 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
           visionMode={visionMode}
           activeStatus={activeDoc?.status}
           onUpload={(f) => void handleUpload(f)}
-          onSelect={setActiveId}
+          onSelect={(id) => {
+            setActiveId(id)
+            setLiteratureChatOpen(false)
+          }}
           onToggleFavorite={handleToggleFavorite}
-          onDeleteDocument={handleDeleteDocument}
+          onDelete={handleDelete}
+          onRename={(id, name) => void handleRename(id, name)}
           onCollapse={() => setShowSidebar(false)}
           onOpenInPane={handleOpenInPane}
           onEditTex={() => setEditTexOpen(true)}
@@ -269,6 +316,8 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
           onToggleVision={cycleVision}
           onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
           onRefreshStatus={refreshActive}
+          onOpenLiteratureChat={() => setLiteratureChatOpen(true)}
+          literatureChatOpen={literatureChatOpen}
         />
       ) : (
         <button
@@ -281,6 +330,13 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
       )}
 
       <main className="workspace">
+        {literatureChatOpen ? (
+          <LiteratureChatPage
+            documents={summaries}
+            onClose={() => setLiteratureChatOpen(false)}
+          />
+        ) : (
+        <>
         {activeDoc && (
           <ProgressBar
             status={activeDoc.status}
@@ -296,26 +352,35 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
             <p className="muted">点击左侧「新解析」上传 PDF 或 TeX 文件开始</p>
           </div>
         ) : (
+          <>
           <PanelGroup direction="horizontal" autoSaveId="paperreader.layout">
             <Panel defaultSize={showChat ? 35 : 50} minSize={20}>
               <PdfPane
+                ref={originalPaneRef}
                 title={sourceTitle}
                 pdfUrl={originalPdfUrl}
                 overrideUrl={overrideLeft?.url}
                 overrideTitle={overrideLeft ? `产物 · ${overrideLeft.name}` : undefined}
                 onAcceptDrop={({ url, name }) => setOverrideLeft({ url, name })}
                 onClearOverride={() => setOverrideLeft(null)}
+                downloadName={activeDoc?.source_filename}
+                counterpartLabel="右侧译文"
+                onLocateCounterpart={(payload) => void handleLocateCounterpart('original', payload)}
               />
             </Panel>
             <PanelResizeHandle className="resize-handle" />
             <Panel defaultSize={showChat ? 35 : 50} minSize={20}>
               <PdfPane
-                title="译文 PDF"
+                ref={translatedPaneRef}
+                title={`译文 · ${translatedName}`}
                 pdfUrl={translatedPdfUrl}
                 overrideUrl={overrideRight?.url}
                 overrideTitle={overrideRight ? `产物 · ${overrideRight.name}` : undefined}
                 onAcceptDrop={({ url, name }) => setOverrideRight({ url, name })}
                 onClearOverride={() => setOverrideRight(null)}
+                downloadName={translatedName}
+                counterpartLabel="左侧原文"
+                onLocateCounterpart={(payload) => void handleLocateCounterpart('translated', payload)}
               />
             </Panel>
             {showChat && (
@@ -325,21 +390,25 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
                   <ChatPanel
                     documentId={activeId}
                     references={chatRefs}
-                    onSend={async ({ message, override_api_key, override_base_url, override_model }) => {
-                      const resp = await sendChat({
-                        document_id: activeId,
-                        message,
-                        override_api_key,
-                        override_base_url,
-                        override_model
-                      })
-                      return resp.answer
-                    }}
+                    onCollapse={() => setShowChat(false)}
                   />
                 </Panel>
               </>
             )}
           </PanelGroup>
+          {!showChat && (
+            <button
+              className="chat-expand-btn"
+              aria-label="展开 AI Chat"
+              title="展开 AI 对话"
+              onClick={() => setShowChat(true)}
+            >
+              <PanelRightOpen size={18} />
+            </button>
+          )}
+          </>
+        )}
+        </>
         )}
       </main>
 
