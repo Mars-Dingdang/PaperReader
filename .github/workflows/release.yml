@@ -61,6 +61,8 @@ jobs:
       - name: Test actual packaged executable
         shell: pwsh
         run: |
+          python scripts/smoke_release.py --web
+          if ($LASTEXITCODE -ne 0) { throw 'Web smoke test failed' }
           $Archive = (Get-ChildItem release/*-Windows-x64.zip).FullName
           python scripts/smoke_release.py --archive $Archive
           if ($LASTEXITCODE -ne 0) { throw 'Packaged smoke test failed' }

@@ -59,7 +59,7 @@ _frontend_override = os.environ.get("PAPERREADER_FRONTEND_DIR", "").strip()
 _frontend_dir = (
     Path(_frontend_override)
     if _frontend_override
-    else Path(__file__).resolve().parents[3] / "frontend" / "dist"
+    else Path(__file__).resolve().parents[2] / "frontend" / "dist"
 )
 if _frontend_dir.is_dir():
     app.mount("/", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")

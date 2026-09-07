@@ -42,7 +42,9 @@ class Client:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--archive', type=Path)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--archive', type=Path)
+    mode.add_argument('--web', action='store_true', help='Test the ordinary web server without desktop overrides')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix='PaperReader smoke ') as temp:
@@ -55,12 +57,17 @@ def main():
                 archive.extractall(base)
             command = [str(base / 'PaperReader.exe')]
             assert (base / 'config.env').is_file()
+        elif args.web:
+            command = [sys.executable, '-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000']
         else:
             command = [sys.executable, str(root / 'desktop' / 'launcher.py')]
         env = os.environ.copy()
         env.update(PAPERREADER_NO_WINDOW='1', DATA_DIR=str(base / '用户数据'),
                    PAPERREADER_ENV_FILE=str(base / 'config.env'), AUTH_SECRET_KEY='smoke-test-only',
                    OPENAI_API_KEY='', MINERU_API_KEY='', PDF_PARSER='local')
+        if args.web:
+            env['PYTHONPATH'] = str(root / 'backend')
+            env.pop('PAPERREADER_FRONTEND_DIR', None)
         processes = []
 
         def start():
