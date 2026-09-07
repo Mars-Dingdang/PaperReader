@@ -4,7 +4,13 @@ import uuid
 from pathlib import Path
 
 from app.core.config import settings
-from app.models.store import ArtifactEntry, DOCUMENTS, DocumentRecord, ReferenceEntry
+from app.models.store import (
+    ArtifactEntry,
+    DocumentRecord,
+    ReferenceEntry,
+    save_document,
+    translated_pdf_filename,
+)
 from app.services.latex_service import (
     compile_tex_project,
     compile_tex_project_with_fallback,
@@ -14,17 +20,21 @@ from app.services.latex_service import (
 )
 from app.services.mineru_layout import (
     Image as IRImage,
+    ListBlock as IRListBlock,
     Paragraph as IRParagraph,
     TextRun as IRTextRun,
     Title as IRTitle,
     blocks_to_ir,
+    collect_translatable_strings,
 )
+from app.services.alignment_service import save_exact_alignment
 from app.services.mineru_service import (
     extract_structured_from_pdf,
+    extract_structured_from_pdf_local,
     extract_text_from_pdf,  # noqa: F401  (kept for test monkeypatching compatibility)
     extract_text_from_pdf_text_layer,
 )
-from app.services.stage_tracker import init_stages, with_stage
+from app.services.stage_tracker import init_stages, set_stage_progress, with_stage
 from app.services.translate_service import (
     translate_ir,
     translate_latex_document,
@@ -176,6 +186,19 @@ def _ir_to_translated_markdown(ir_blocks: list) -> str:
             joined = "".join(text_runs).strip()
             if joined:
                 parts.append(joined)
+        elif isinstance(block, IRListBlock):
+            for item in block.items:
+                item_parts: list[str] = []
+                for run in item:
+                    if isinstance(run, IRTextRun):
+                        item_parts.append(run.text)
+                    else:
+                        latex = getattr(run, "latex", "")
+                        if latex:
+                            item_parts.append(f"${latex}$")
+                joined = "".join(item_parts).strip()
+                if joined:
+                    parts.append(joined)
         elif isinstance(block, IRImage):
             parts.append(f"![]({block.rel_path})")
         else:
@@ -204,6 +227,20 @@ def _append_artifact(record: DocumentRecord, name: str, kind: str, path: Path) -
             url=_to_data_url(path),
         )
     )
+
+
+def _publish_translated_pdf(
+    record: DocumentRecord, compiled_pdf: Path, output_dir: Path
+) -> Path:
+    """Publish a translated PDF using the source-derived download name."""
+    name = translated_pdf_filename(record.source_filename)
+    output = output_dir / name
+    copy_pdf_to_output(compiled_pdf, output)
+    if compiled_pdf.resolve() != output.resolve():
+        compiled_pdf.unlink(missing_ok=True)
+    record.translated_pdf_url = _to_data_url(output)
+    _append_artifact(record, name, "translated_pdf", output)
+    return output
 
 
 def _extract_references_from_text(text: str) -> list[ReferenceEntry]:
@@ -247,17 +284,17 @@ def _extract_references_from_text(text: str) -> list[ReferenceEntry]:
     return refs
 
 
-def create_document_record(source_path: Path, source_type: str) -> DocumentRecord:
+def create_document_record(source_path: Path, source_type: str, owner_user_id: int = 0) -> DocumentRecord:
     document_id = str(uuid.uuid4())
     source_filename = source_path.name.split("_", 1)[-1] if "_" in source_path.name else source_path.name
     record = DocumentRecord(
         document_id=document_id,
+        owner_user_id=owner_user_id,
         source_type=source_type,
         source_path=source_path,
         source_filename=source_filename,
     )
-    DOCUMENTS[document_id] = record
-    return record
+    return save_document(record)
 
 
 def process_document(
@@ -269,6 +306,7 @@ def process_document(
     record.status = "processing"
     record.logs.append("Processing started")
     init_stages(record, vision_check_enabled=record.vision_check_enabled)
+    save_document(record)
     try:
         record.size_bytes = record.source_path.stat().st_size
     except OSError:
@@ -342,16 +380,13 @@ def process_document(
                 _append_artifact(record, "translated.tex", "translated_tex", translated_tex)
                 record.logs.append(f"Translated TEX: {translated_tex}")
 
-                translated_out = output_dir / "translated.pdf"
-                copy_pdf_to_output(translated_pdf, translated_out)
-                record.translated_pdf_url = f"/data/outputs/{record.document_id}/translated.pdf"
-                _append_artifact(record, "translated.pdf", "translated_pdf", translated_out)
+                _publish_translated_pdf(record, translated_pdf, output_dir)
 
             record.status = "done"
             record.logs.append("Processing done")
-            return record
+            return save_document(record)
         else:
-            with with_stage(record, "mineru"):
+            with with_stage(record, "parse"):
                 record.logs.append("Handling source PDF")
                 original_out = output_dir / "original.pdf"
                 shutil.copyfile(record.source_path, original_out)
@@ -359,11 +394,40 @@ def process_document(
                 _append_artifact(record, "original.pdf", "original_pdf", original_out)
                 _append_artifact(record, record.source_path.name, "source_pdf", record.source_path)
 
-                nougat_dir = output_dir / "mineru"
-                record.logs.append("Submitting PDF to MinerU")
-                mineru_result = extract_structured_from_pdf(
-                    str(record.source_path), nougat_dir, log_sink=record.logs
-                )
+                if settings.pdf_parser == "mineru":
+                    extract_dir = output_dir / "mineru"
+                    record.logs.append("Submitting PDF to MinerU")
+                    try:
+                        mineru_result = extract_structured_from_pdf(
+                            str(record.source_path),
+                            extract_dir,
+                            log_sink=record.logs,
+                            progress_cb=lambda frac, label: set_stage_progress(
+                                record, "parse", frac, label
+                            ),
+                        )
+                    except Exception as mineru_exc:
+                        # MinerU's result CDN can fail after cloud parsing has
+                        # completed. Keep the website usable for text-layer PDFs
+                        # by falling back locally instead of failing the task.
+                        record.logs.append(
+                            f"MinerU unavailable ({mineru_exc}); falling back to local PDF parsing"
+                        )
+                        extract_dir = output_dir / "local"
+                        try:
+                            mineru_result = extract_structured_from_pdf_local(
+                                str(record.source_path), extract_dir, log_sink=record.logs
+                            )
+                        except Exception as local_exc:
+                            raise RuntimeError(
+                                f"MinerU parsing failed: {mineru_exc}; local fallback also failed: {local_exc}"
+                            ) from local_exc
+                else:
+                    extract_dir = output_dir
+                    record.logs.append("Extracting PDF locally (text layer + images)")
+                    mineru_result = extract_structured_from_pdf_local(
+                        str(record.source_path), extract_dir, log_sink=record.logs
+                    )
 
             with with_stage(record, "clean"):
                 extracted_text = mineru_result.markdown
@@ -375,7 +439,11 @@ def process_document(
                     leading_fallback_text=fallback_text,
                 )
                 if not record.extracted_text:
-                    raise RuntimeError("MinerU output became empty after cleaning missing-page markers")
+                    raise RuntimeError(
+                        "No readable text could be extracted from this PDF. "
+                        "It may be a scanned / image-only PDF with no embedded text layer "
+                        "(the local parser has no OCR; set PDF_PARSER=mineru to use cloud OCR)."
+                    )
                 if missing_page_count:
                     record.logs.append(
                         f"MinerU warning: {missing_page_count} missing-page marker(s) stripped; content may be incomplete"
@@ -387,8 +455,8 @@ def process_document(
                     record.logs.append("Heading repaired: inserted Problem 1")
                 elif repaired_up_to > 1:
                     record.logs.append(f"Heading repaired: inserted Problems 1-{repaired_up_to}")
-                record.logs.append(f"MinerU model: {device_or_mode}")
-                record.logs.append(f"MinerU output dir: {nougat_dir}")
+                record.logs.append(f"Extraction model: {device_or_mode}")
+                record.logs.append(f"Extraction dir: {extract_dir}")
                 for generated in nougat_files:
                     _append_artifact(record, generated.name, "mineru_output", generated)
 
@@ -426,18 +494,29 @@ def process_document(
 
                 if ir_blocks is not None:
                     record.logs.append("Translating structured blocks")
+                    source_alignment_segments = collect_translatable_strings(ir_blocks)
                     translate_ir(
                         ir_blocks,
                         override_api_key=override_api_key,
                         override_base_url=override_base_url,
                         override_model=override_model,
                     )
+                    translated_alignment_segments = collect_translatable_strings(ir_blocks)
+                    alignment_path = save_exact_alignment(
+                        record, source_alignment_segments, translated_alignment_segments
+                    )
+                    if alignment_path:
+                        _append_artifact(record, alignment_path.name, "alignment_index", alignment_path)
+                        record.logs.append(
+                            f"Saved {len(source_alignment_segments)} exact bilingual alignment segments"
+                        )
                     record.translated_text = _ir_to_translated_markdown(ir_blocks)
                     create_translated_tex_from_ir(
                         ir_blocks,
                         translated_tex,
                         images_src_dir=mineru_result.images_dir,
                         title=display_title,
+                        two_column=mineru_result.two_column,
                     )
                     if mineru_result.images_dir and mineru_result.images_dir.is_dir():
                         copied = sum(1 for _ in mineru_result.images_dir.iterdir())
@@ -463,15 +542,11 @@ def process_document(
                     record.last_compile_warning = compile_result.warning
                     record.logs.append(f"LaTeX warning: {compile_result.warning}")
                 record.translated_tex_path = translated_tex
-                translated_out = output_dir / "translated.pdf"
-                copy_pdf_to_output(translated_pdf, translated_out)
-                record.translated_pdf_url = f"/data/outputs/{record.document_id}/translated.pdf"
-                _append_artifact(record, "translated.pdf", "translated_pdf", translated_out)
+                _publish_translated_pdf(record, translated_pdf, output_dir)
 
         record.status = "done"
         record.logs.append("Processing done")
     except Exception as exc:
         record.status = "failed"
         record.logs.append(f"Error: {exc}")
-
-    return record
+    return save_document(record)

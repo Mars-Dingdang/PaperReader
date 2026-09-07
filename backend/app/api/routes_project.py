@@ -5,18 +5,23 @@ import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from app.api.deps import get_current_user
 from app.core.config import settings
 from app.models.schemas import UploadResponse
 from app.models.store import (
-    DOCUMENTS,
     DocumentRecord,
-    PROJECTS,
     ProjectFile,
     ProjectRecord,
+    get_document,
+    require_project_owner,
+    save_document,
+    save_project,
+    delete_project as delete_project_record,
 )
+from app.services.auth_service import User
 from app.services.document_pipeline import process_document
 
 
@@ -38,7 +43,6 @@ def _projects_root() -> Path:
 
 
 def _safe_relative(rel: str) -> Path:
-    """Sanitize a user-provided relative path; reject path traversal."""
     rel = (rel or "").replace("\\", "/").lstrip("/")
     if not rel:
         raise HTTPException(status_code=400, detail="empty relative path")
@@ -67,7 +71,7 @@ def _classify(p: Path) -> str:
     return "other"
 
 
-def _refresh_project(project: ProjectRecord) -> None:
+def _refresh_project(project: ProjectRecord) -> ProjectRecord:
     files: list[ProjectFile] = []
     main_candidates: list[str] = []
     for path in project.dir.rglob("*"):
@@ -87,6 +91,7 @@ def _refresh_project(project: ProjectRecord) -> None:
     project.files = files
     if project.main_tex not in {f.relative_path for f in files}:
         project.main_tex = main_candidates[0] if main_candidates else None
+    return save_project(project)
 
 
 class CreateProjectRequest(BaseModel):
@@ -118,31 +123,39 @@ class BuildProjectRequest(BaseModel):
     vision_check_mode: str = "auto"
 
 
+class DeleteFilesRequest(BaseModel):
+    relative_paths: list[str]
+
+
+def _detail(project: ProjectRecord) -> ProjectDetail:
+    refreshed = _refresh_project(project)
+    return ProjectDetail(
+        project_id=refreshed.project_id,
+        name=refreshed.name,
+        main_tex=refreshed.main_tex,
+        files=[ProjectFileItem(**f.__dict__) for f in refreshed.files],
+        main_candidates=[f.relative_path for f in refreshed.files if f.kind == "tex"],
+    )
+
+
 @router.post("/project", response_model=CreateProjectResponse)
-def create_project(req: CreateProjectRequest | None = None) -> CreateProjectResponse:
+def create_project(
+    req: CreateProjectRequest | None = None,
+    user: User = Depends(get_current_user),
+) -> CreateProjectResponse:
     project_id = str(uuid.uuid4())
     name = (req.name if req else None) or f"project-{project_id[:8]}"
     pdir = _projects_root() / project_id
     pdir.mkdir(parents=True, exist_ok=True)
-    project = ProjectRecord(project_id=project_id, name=name, dir=pdir)
-    PROJECTS[project_id] = project
-    return CreateProjectResponse(project_id=project_id, name=name)
+    project = ProjectRecord(project_id=project_id, owner_user_id=user.id, name=name, dir=pdir)
+    save_project(project)
+    return CreateProjectResponse(project_id=project.project_id, name=project.name)
 
 
 @router.get("/project/{project_id}", response_model=ProjectDetail)
-def get_project(project_id: str) -> ProjectDetail:
-    project = PROJECTS.get(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    _refresh_project(project)
-    main_candidates = [f.relative_path for f in project.files if f.kind == "tex"]
-    return ProjectDetail(
-        project_id=project.project_id,
-        name=project.name,
-        main_tex=project.main_tex,
-        files=[ProjectFileItem(**f.__dict__) for f in project.files],
-        main_candidates=main_candidates,
-    )
+def get_project_detail(project_id: str, user: User = Depends(get_current_user)) -> ProjectDetail:
+    project = require_project_owner(project_id, user.id)
+    return _detail(project)
 
 
 @router.post("/project/{project_id}/files", response_model=ProjectDetail)
@@ -150,10 +163,9 @@ async def upload_project_file(
     project_id: str,
     file: UploadFile = File(...),
     relative_path: str = Form(""),
+    user: User = Depends(get_current_user),
 ) -> ProjectDetail:
-    project = PROJECTS.get(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_owner(project_id, user.id)
 
     rel_path_str = relative_path or (file.filename or "")
     rel = _safe_relative(rel_path_str)
@@ -165,7 +177,6 @@ async def upload_project_file(
     if len(content) > max_bytes:
         raise HTTPException(status_code=413, detail=f"file exceeds {settings.project_max_file_mb}MB")
 
-    # check total
     existing_total = sum(f.size for f in project.files)
     if existing_total + len(content) > settings.project_max_total_mb * 1024 * 1024:
         raise HTTPException(status_code=413, detail="project total size limit exceeded")
@@ -173,27 +184,16 @@ async def upload_project_file(
     target = project.dir / rel
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(content)
-
-    _refresh_project(project)
-    main_candidates = [f.relative_path for f in project.files if f.kind == "tex"]
-    return ProjectDetail(
-        project_id=project.project_id,
-        name=project.name,
-        main_tex=project.main_tex,
-        files=[ProjectFileItem(**f.__dict__) for f in project.files],
-        main_candidates=main_candidates,
-    )
-
-
-class DeleteFilesRequest(BaseModel):
-    relative_paths: list[str]
+    return _detail(project)
 
 
 @router.post("/project/{project_id}/delete-files", response_model=ProjectDetail)
-def delete_files(project_id: str, req: DeleteFilesRequest) -> ProjectDetail:
-    project = PROJECTS.get(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+def delete_files(
+    project_id: str,
+    req: DeleteFilesRequest,
+    user: User = Depends(get_current_user),
+) -> ProjectDetail:
+    project = require_project_owner(project_id, user.id)
     for rel in req.relative_paths:
         try:
             target = project.dir / _safe_relative(rel)
@@ -201,18 +201,11 @@ def delete_files(project_id: str, req: DeleteFilesRequest) -> ProjectDetail:
             continue
         if target.is_file() and target.resolve().is_relative_to(project.dir.resolve()):
             target.unlink(missing_ok=True)
-    _refresh_project(project)
-    return ProjectDetail(
-        project_id=project.project_id,
-        name=project.name,
-        main_tex=project.main_tex,
-        files=[ProjectFileItem(**f.__dict__) for f in project.files],
-        main_candidates=[f.relative_path for f in project.files if f.kind == "tex"],
-    )
+    return _detail(project)
 
 
 def _run_pipeline(record_id: str) -> None:
-    record = DOCUMENTS.get(record_id)
+    record = get_document(record_id)
     if record:
         process_document(record)
 
@@ -222,20 +215,20 @@ def build_project(
     project_id: str,
     req: BuildProjectRequest,
     background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
 ) -> UploadResponse:
-    project = PROJECTS.get(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
+    project = require_project_owner(project_id, user.id)
     main_rel = _safe_relative(req.main_tex)
     main_path = project.dir / main_rel
     if not main_path.is_file() or main_path.suffix.lower() != ".tex":
         raise HTTPException(status_code=400, detail="main_tex must be an existing .tex file")
     project.main_tex = main_rel.as_posix()
+    save_project(project)
 
     document_id = str(uuid.uuid4())
     record = DocumentRecord(
         document_id=document_id,
+        owner_user_id=user.id,
         source_type="tex_project",
         source_path=main_path,
         source_filename=main_path.name,
@@ -244,16 +237,14 @@ def build_project(
     )
     record.vision_check_enabled = bool(req.vision_check_enabled)
     record.vision_check_mode = req.vision_check_mode if req.vision_check_mode in ("auto", "manual") else "auto"
-    DOCUMENTS[document_id] = record
+    save_document(record)
 
     background_tasks.add_task(_run_pipeline, document_id)
     return UploadResponse(document_id=document_id, status=record.status)
 
 
 @router.delete("/project/{project_id}")
-def delete_project(project_id: str) -> dict:
-    project = PROJECTS.pop(project_id, None)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+def delete_project(project_id: str, user: User = Depends(get_current_user)) -> dict:
+    project = delete_project_record(project_id, user.id)
     shutil.rmtree(project.dir, ignore_errors=True)
     return {"ok": True}

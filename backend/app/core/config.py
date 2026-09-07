@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from pydantic import Field
@@ -6,7 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(Path(__file__).resolve().parents[3] / ".env"),
+        env_file=os.environ.get("PAPERREADER_ENV_FILE")
+        or str(Path(__file__).resolve().parents[3] / ".env"),
         case_sensitive=False,
         extra="ignore",
     )
@@ -15,16 +17,30 @@ class Settings(BaseSettings):
         project_root = Path(__file__).resolve().parents[3]
         if not self.data_dir.is_absolute():
             self.data_dir = (project_root / self.data_dir).resolve()
+        # v1 used MinerU unconditionally and had no PDF_PARSER setting. Keep
+        # existing key-based configurations working; new installs explicitly
+        # select local parsing in .env.example.
+        if not self.pdf_parser:
+            self.pdf_parser = "mineru" if self.mineru_api_key else "local"
 
     app_env: str = Field(default="dev", alias="APP_ENV")
 
     data_dir: Path = Field(default=Path("../data"), alias="DATA_DIR")
     upload_dir_name: str = Field(default="uploads", alias="UPLOAD_DIR_NAME")
     output_dir_name: str = Field(default="outputs", alias="OUTPUT_DIR_NAME")
+    sqlite_db_name: str = Field(default="paperreader.db", alias="SQLITE_DB_NAME")
 
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
+
+    auth_secret_key: str = Field(default="paperreader-dev-secret", alias="AUTH_SECRET_KEY")
+    session_days: int = Field(default=1, alias="SESSION_DAYS")
+    remember_me_days: int = Field(default=30, alias="REMEMBER_ME_DAYS")
+
+    # PDF parsing backend: "local" extracts the embedded text layer with pypdf
+    # (no external service / API key needed); "mineru" uses the MinerU cloud API.
+    pdf_parser: str = Field(default="", alias="PDF_PARSER")
 
     mineru_api_key: str = Field(default="", alias="MINERU_API_KEY")
     mineru_base_url: str = Field(default="https://mineru.net/api/v4", alias="MINERU_BASE_URL")
@@ -41,8 +57,10 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
 
     # Vision-model adversarial check (Phase D)
+    # Disabled by default: DeepSeek (and most text-only endpoints) has no
+    # vision-capable model. Requires a multimodal model at OPENAI_BASE_URL.
     vision_model: str = Field(default="GLM-4.5V", alias="VISION_MODEL")
-    vision_check_enabled: bool = Field(default=True, alias="VISION_CHECK_ENABLED")
+    vision_check_enabled: bool = Field(default=False, alias="VISION_CHECK_ENABLED")
     vision_check_mode: str = Field(default="auto", alias="VISION_CHECK_MODE")  # auto | manual
     vision_check_max_pages: int = Field(default=8, alias="VISION_CHECK_MAX_PAGES")
 
@@ -60,6 +78,9 @@ class Settings(BaseSettings):
     # Max characters joined per IR batch request. Larger batches amortize RTT
     # but risk hitting per-request token limits; tune per provider.
     translate_batch_max_chars: int = Field(default=6000, alias="TRANSLATE_BATCH_MAX_CHARS")
+    # Hard cap for a single prose segment. MinerU can emit a whole page as one
+    # paragraph; pre-splitting it avoids model output-limit truncation.
+    translate_segment_max_chars: int = Field(default=2000, alias="TRANSLATE_SEGMENT_MAX_CHARS")
 
     cors_origins_raw: str = Field(default="http://localhost:5173", alias="CORS_ORIGINS")
 

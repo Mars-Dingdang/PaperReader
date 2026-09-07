@@ -4,22 +4,27 @@ import {
   Eye,
   FileText,
   FolderOpen,
+  LogOut,
   MessageSquareText,
   Moon,
   PanelLeftClose,
   Pencil,
   Plus,
   RefreshCw,
+  Settings,
+  Sparkles,
   Star,
   Sun,
+  Trash2,
 } from 'lucide-react'
-import type { ArtifactItem, DocumentSummary } from '../lib/api'
+import type { ArtifactItem, AuthUser, DocumentSummary } from '../lib/api'
 import { makeDataUrl } from '../lib/api'
 import { ArtifactPreviewTip } from './ArtifactPreviewTip'
 
 type Tab = 'tasks' | 'favorites'
 
 type Props = {
+  user: AuthUser
   documents: DocumentSummary[]
   activeDocumentId?: string
   favorites: string[]
@@ -34,14 +39,20 @@ type Props = {
   onUpload: (file: File) => void
   onSelect: (documentId: string) => void
   onToggleFavorite: (documentId: string) => void
+  onDelete: (documentId: string) => void
+  onRename: (documentId: string, name: string) => void
   onCollapse: () => void
   onOpenInPane?: (artifact: ArtifactItem) => void
   onEditTex?: (artifact: ArtifactItem) => void
   onNewProject?: () => void
+  onOpenProfile: () => void
+  onLogout: () => void
   onToggleChat: () => void
   onToggleVision: () => void
   onToggleTheme: () => void
   onRefreshStatus: () => void
+  onOpenLiteratureChat: () => void
+  literatureChatOpen: boolean
 }
 
 function formatSize(bytes: number): string {
@@ -56,7 +67,13 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={cls}>{status}</span>
 }
 
+function formatTime(value?: string | null): string {
+  if (!value) return '刚刚创建'
+  return new Date(value).toLocaleString()
+}
+
 export function Sidebar({
+  user,
   documents,
   activeDocumentId,
   favorites,
@@ -71,21 +88,29 @@ export function Sidebar({
   onUpload,
   onSelect,
   onToggleFavorite,
+  onDelete,
+  onRename,
   onCollapse,
   onOpenInPane,
   onEditTex,
   onNewProject,
+  onOpenProfile,
+  onLogout,
   onToggleChat,
   onToggleVision,
   onToggleTheme,
   onRefreshStatus,
+  onOpenLiteratureChat,
+  literatureChatOpen,
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [tab, setTab] = useState<Tab>('tasks')
   const [showArtifacts, setShowArtifacts] = useState(true)
   const [showLogs, setShowLogs] = useState(false)
   const [hoverPreview, setHoverPreview] = useState<{ artifact: ArtifactItem; rect: DOMRect } | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ documentId: string; x: number; y: number } | null>(null)
   const hoverTimerRef = useRef<number | null>(null)
+
   useEffect(() => () => {
     if (hoverTimerRef.current) window.clearTimeout(hoverTimerRef.current)
   }, [])
@@ -106,6 +131,18 @@ export function Sidebar({
           <PanelLeftClose size={18} />
         </button>
       </div>
+
+      <button
+        className={`literature-chat-entry ${literatureChatOpen ? 'active' : ''}`}
+        onClick={onOpenLiteratureChat}
+      >
+        <span className="literature-chat-icon"><Sparkles size={17} /></span>
+        <span>
+          <strong>AI Literature Chat</strong>
+          <small>跨论文检索、比较与讨论</small>
+        </span>
+        <ChevronRight size={14} />
+      </button>
 
       <div className="sidebar-toolbar" role="toolbar" aria-label="工具">
         <button
@@ -177,7 +214,7 @@ export function Sidebar({
           onClick={() => setTab('tasks')}
         >
           <FolderOpen size={16} />
-          任务管理
+          历史记录
         </button>
         <button
           className={`nav-item ${tab === 'favorites' ? 'active' : ''}`}
@@ -193,7 +230,7 @@ export function Sidebar({
       <div className="doc-list">
         {visible.length === 0 ? (
           <div className="muted small" style={{ padding: '12px' }}>
-            {tab === 'favorites' ? '尚无收藏' : '暂无任务，点击「新解析」上传文件'}
+            {tab === 'favorites' ? '尚无收藏' : '暂无历史记录，点击「新解析」上传文件'}
           </div>
         ) : (
           visible.map((doc) => {
@@ -204,6 +241,11 @@ export function Sidebar({
                 key={doc.document_id}
                 className={`doc-item ${active ? 'active' : ''}`}
                 onClick={() => onSelect(doc.document_id)}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setContextMenu({ documentId: doc.document_id, x: e.clientX, y: e.clientY })
+                }}
               >
                 <div className="doc-icon">
                   <FileText size={20} />
@@ -214,6 +256,7 @@ export function Sidebar({
                     <span>{formatSize(doc.size_bytes)}</span>
                     <StatusBadge status={doc.status} />
                   </div>
+                  <div className="muted tiny">{formatTime(doc.last_opened_at || doc.updated_at || doc.created_at)}</div>
                 </div>
                 <button
                   className={`star-btn ${fav ? 'on' : ''}`}
@@ -224,6 +267,16 @@ export function Sidebar({
                   }}
                 >
                   <Star size={14} fill={fav ? 'currentColor' : 'none'} />
+                </button>
+                <button
+                  className="star-btn"
+                  title="移除历史"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onDelete(doc.document_id)
+                  }}
+                >
+                  <Trash2 size={14} />
                 </button>
                 <ChevronRight size={14} className="chev" />
               </div>
@@ -337,6 +390,32 @@ export function Sidebar({
           </div>
         </>
       )}
+
+      <div className="sidebar-divider" />
+      <div className="account-card">
+        <div className="account-main">
+          {user.avatar_url ? (
+            <img src={makeDataUrl(user.avatar_url)} alt={user.username} className="avatar-image" />
+          ) : (
+            <div className="avatar-fallback">{user.username.slice(0, 1).toUpperCase()}</div>
+          )}
+          <div className="account-meta">
+            <div className="account-name">{user.username}</div>
+            <div className="muted small">最近登录：{formatTime(user.last_login_at)}</div>
+          </div>
+        </div>
+        <div className="account-actions">
+          <button className="btn small-btn" onClick={onOpenProfile}>
+            <Settings size={14} />
+            个人中心
+          </button>
+          <button className="btn small-btn" onClick={onLogout}>
+            <LogOut size={14} />
+            退出
+          </button>
+        </div>
+      </div>
+
       {hoverPreview && hoverPreview.artifact.url && (
         <ArtifactPreviewTip
           url={hoverPreview.artifact.url}
@@ -344,6 +423,47 @@ export function Sidebar({
           name={hoverPreview.artifact.name}
           anchorRect={hoverPreview.rect}
         />
+      )}
+
+      {contextMenu && (
+        <>
+          <div
+            className="context-menu-overlay"
+            onClick={() => setContextMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              setContextMenu(null)
+            }}
+          />
+          <div className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
+            <button
+              className="context-menu-item"
+              onClick={() => {
+                const id = contextMenu.documentId
+                const current = documents.find((item) => item.document_id === id)?.source_filename || ''
+                setContextMenu(null)
+                const next = window.prompt('请输入新的文档名', current)
+                if (next && next.trim() && next.trim() !== current) {
+                  onRename(id, next.trim())
+                }
+              }}
+            >
+              <Pencil size={14} />
+              更改文档名
+            </button>
+            <button
+              className="context-menu-item danger"
+              onClick={() => {
+                const id = contextMenu.documentId
+                setContextMenu(null)
+                onDelete(id)
+              }}
+            >
+              <Trash2 size={14} />
+              删除文档
+            </button>
+          </div>
+        </>
       )}
     </aside>
   )

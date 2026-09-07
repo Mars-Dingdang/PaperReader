@@ -35,7 +35,7 @@ export function ArtifactPreviewTip({ url, kind, name, anchorRect }: Props) {
       return
     }
     let cancelled = false
-    fetch(fullUrl)
+    fetch(fullUrl, { credentials: 'include' })
       .then((r) => (r.ok ? r.text() : ''))
       .then((t) => {
         const head = t.split('\n').slice(0, 60).join('\n')
