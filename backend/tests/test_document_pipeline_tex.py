@@ -44,6 +44,11 @@ Hello world.
         raise AssertionError("Generic translated TeX wrapper should not run for TEX input")
 
     monkeypatch.setattr(document_pipeline, "compile_tex_project", fake_compile_tex_project)
+    from app.services.latex_service import LatexCompileResult
+    monkeypatch.setattr(
+        document_pipeline, "compile_tex_project_with_fallback",
+        lambda tex_path, output_dir: LatexCompileResult(fake_compile_tex_project(tex_path, output_dir)),
+    )
     monkeypatch.setattr(document_pipeline, "translate_latex_document", fake_translate_latex_document)
     monkeypatch.setattr(document_pipeline, "extract_text_from_pdf", fake_extract_text_from_pdf)
     monkeypatch.setattr(document_pipeline, "create_translated_tex", fake_create_translated_tex)
@@ -51,7 +56,7 @@ Hello world.
     record = document_pipeline.create_document_record(source_path, "tex")
     result = document_pipeline.process_document(record)
 
-    assert result.status == "done"
+    assert result.status == "done", result.logs
     assert nougat_called is False
     assert wrapper_called is False
     translated_tex = output_root / record.document_id / "translated.tex"
