@@ -1,0 +1,95 @@
+name: Test and package PaperReader
+
+on:
+  push:
+    branches: [main, 'codex/release-*']
+    tags: ['v2.*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    name: Backend (${{ matrix.os }}, Python ${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.11']
+        include:
+          - os: ubuntu-latest
+            python: '3.12'
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONPATH: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pytest backend/tests -q
+      - run: python -m compileall -q backend/app desktop/launcher.py
+
+  windows:
+    name: Windows portable build and smoke test
+    runs-on: windows-latest
+    needs: compatibility
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            desktop/requirements-build.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: python -m pip install -r desktop/requirements-build.txt
+      - name: Build versioned portable ZIP
+        shell: pwsh
+        run: ./desktop/build_portable.ps1
+      - name: Test actual packaged executable
+        shell: pwsh
+        run: |
+          $Archive = (Get-ChildItem release/*-Windows-x64.zip).FullName
+          python scripts/smoke_release.py --archive $Archive
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged smoke test failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PaperReader-Windows-x64
+          path: |
+            release/*-Windows-x64.zip
+            release/*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish tagged release
+    if: startsWith(github.ref, 'refs/tags/v2.')
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: PaperReader-Windows-x64
+          path: release
+      - name: Verify version and publish application
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION=$(python -c "import json; print(json.load(open('frontend/package.json'))['version'])")
+          test "$RELEASE_TAG" = "v${VERSION%.*}"
+          gh release create "$RELEASE_TAG" release/* --verify-tag --title "PaperReader $RELEASE_TAG" --notes-file "docs/releases/$RELEASE_TAG.md" --latest

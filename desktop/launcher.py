@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import subprocess
 import sys
@@ -13,6 +14,8 @@ import urllib.request
 import webbrowser
 from ctypes import wintypes
 from pathlib import Path
+
+from dotenv import dotenv_values
 
 
 APP_NAME = "PaperReader"
@@ -36,13 +39,17 @@ def _portable_root() -> Path:
 def _prepare_environment() -> None:
     bundle = _bundle_root()
     portable = _portable_root()
-    data_dir = portable / "data"
     frozen = bool(getattr(sys, "frozen", False))
     config_path = portable / ("config.env" if frozen else ".env")
+    config_path = Path(os.environ.get("PAPERREADER_ENV_FILE") or config_path)
+    config_values = dotenv_values(config_path) if config_path.is_file() else {}
+    data_dir = Path(os.environ.get("DATA_DIR") or config_values.get("DATA_DIR") or portable / "data")
+    if not data_dir.is_absolute():
+        data_dir = (portable / data_dir).resolve()
     frontend_dir = bundle / ("frontend_dist" if frozen else "frontend/dist")
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    os.environ.setdefault("DATA_DIR", str(data_dir))
+    os.environ["DATA_DIR"] = str(data_dir)
     os.environ.setdefault("PAPERREADER_FRONTEND_DIR", str(frontend_dir))
     os.environ.setdefault("PAPERREADER_ENV_FILE", str(config_path))
     os.environ.setdefault("CORS_ORIGINS", f"http://{HOST}:{PORT}")
@@ -78,7 +85,7 @@ def _wait_until_ready(url: str, timeout: float = 45.0) -> bool:
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(f"{url}/health", timeout=1.0) as response:
-                if response.status == 200:
+                if response.status == 200 and json.load(response).get("app") == APP_NAME:
                     return True
         except Exception:
             time.sleep(0.25)
@@ -164,9 +171,10 @@ def _apply_edge_window_icon(process_id: int, timeout: float = 15.0) -> bool:
 
 def _open_window(server, url: str) -> None:
     if not _wait_until_ready(url):
-        ctypes.windll.user32.MessageBoxW(
-            0, "PaperReader 服务启动失败，请查看 config.env 后重试。", APP_NAME, 0x10
-        )
+        if os.environ.get("PAPERREADER_NO_WINDOW") != "1":
+            ctypes.windll.user32.MessageBoxW(
+                0, "PaperReader 服务启动失败，请查看 config.env 后重试。", APP_NAME, 0x10
+            )
         server.should_exit = True
         return
     if os.environ.get("PAPERREADER_NO_WINDOW") == "1":

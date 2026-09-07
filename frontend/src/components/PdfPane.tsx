@@ -173,7 +173,7 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
     }
   }, [effectiveUrl])
 
-  const fileOpts = useMemo(() => (effectiveUrl ? { url: effectiveUrl } : null), [effectiveUrl])
+  const fileOpts = useMemo(() => (effectiveUrl ? { url: effectiveUrl, withCredentials: true } : null), [effectiveUrl])
 
   async function mapOutlineItem(doc: any, item: any): Promise<OutlineItem> {
     let pageIndex: number | null = null

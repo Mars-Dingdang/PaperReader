@@ -116,7 +116,11 @@ export type ChatSession = {
   messages: ChatMessage[]
 }
 
-const BACKEND = (import.meta as any).env?.VITE_BACKEND_URL || 'http://localhost:8000'
+// Production (including the portable app) uses the page's origin so session
+// cookies work for localhost, 127.0.0.1, and reverse-proxy deployments alike.
+const BACKEND = (import.meta.env.VITE_BACKEND_URL || (
+  import.meta.env.DEV ? 'http://localhost:8000' : ''
+)).replace(/\/$/, '')
 
 async function apiFetch(path: string, init: RequestInit = {}, expectJson = true) {
   const res = await fetch(`${BACKEND}${path}`, {

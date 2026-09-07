@@ -17,6 +17,11 @@ class Settings(BaseSettings):
         project_root = Path(__file__).resolve().parents[3]
         if not self.data_dir.is_absolute():
             self.data_dir = (project_root / self.data_dir).resolve()
+        # v1 used MinerU unconditionally and had no PDF_PARSER setting. Keep
+        # existing key-based configurations working; new installs explicitly
+        # select local parsing in .env.example.
+        if not self.pdf_parser:
+            self.pdf_parser = "mineru" if self.mineru_api_key else "local"
 
     app_env: str = Field(default="dev", alias="APP_ENV")
 
@@ -35,7 +40,7 @@ class Settings(BaseSettings):
 
     # PDF parsing backend: "local" extracts the embedded text layer with pypdf
     # (no external service / API key needed); "mineru" uses the MinerU cloud API.
-    pdf_parser: str = Field(default="local", alias="PDF_PARSER")
+    pdf_parser: str = Field(default="", alias="PDF_PARSER")
 
     mineru_api_key: str = Field(default="", alias="MINERU_API_KEY")
     mineru_base_url: str = Field(default="https://mineru.net/api/v4", alias="MINERU_BASE_URL")

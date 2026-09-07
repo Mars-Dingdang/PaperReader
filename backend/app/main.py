@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.routes_auth import router as auth_router
 from app.api.routes_chat import router as chat_router
+from app.api.routes_data import router as data_router
 from app.api.routes_document import router as document_router
 from app.api.routes_project import router as project_router
 from app.api.routes_recompile import router as recompile_router
@@ -23,7 +24,7 @@ from app.core.database import init_database
 mimetypes.add_type("text/javascript", ".mjs")
 
 
-app = FastAPI(title="Paper Reader MVP", version="0.1.0")
+app = FastAPI(title="PaperReader", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,12 +44,12 @@ app.include_router(project_router, prefix="/api", tags=["project"])
 app.include_router(review_router, prefix="/api", tags=["review"])
 app.include_router(recompile_router, prefix="/api", tags=["recompile"])
 
-app.mount("/data", StaticFiles(directory=str(settings.data_dir)), name="data")
+app.include_router(data_router, tags=["data"])
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    return {"status": "ok", "app": "PaperReader", "version": app.version}
 
 
 # The development UI is served by Vite on port 5173.  A packaged desktop build
@@ -58,7 +59,7 @@ _frontend_override = os.environ.get("PAPERREADER_FRONTEND_DIR", "").strip()
 _frontend_dir = (
     Path(_frontend_override)
     if _frontend_override
-    else Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    else Path(__file__).resolve().parents[3] / "frontend" / "dist"
 )
 if _frontend_dir.is_dir():
     app.mount("/", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")
