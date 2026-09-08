@@ -1,0 +1,126 @@
+name: Update v2.1.2 current-version docs
+
+on:
+  push:
+    branches:
+      - fix/latex-compiler-detection-v2.1.2
+
+permissions:
+  contents: write
+
+jobs:
+  update-docs:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update current release documentation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              if old not in text:
+                  raise SystemExit(f'expected text not found in {path}: {old!r}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          readme = Path('README.md')
+          text = readme.read_text(encoding='utf-8')
+          text = text.replace('# PaperReader v2.1.1', '# PaperReader v2.1.2', 1)
+          text = text.replace(
+              '[Download Windows / macOS v2.1.1](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.1) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.1.md)',
+              '[Download Windows / macOS v2.1.2](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.2) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.2.md)',
+              1,
+          )
+          old_intro = 'v2.1.1 improves the desktop PDF reader, safely imports complete LaTeX source archives, and disables visual checking by default for new accounts and documents. Existing saved visual-check preferences are preserved. Frontend/API package version: `2.1.1`.'
+          new_intro = 'v2.1.2 fixes LaTeX source compatibility by respecting supported compiler declarations from arXiv `00README.json` metadata or `% !TeX program = ...` comments. Projects without a supported declaration remain backward-compatible and continue to use XeLaTeX by default. Frontend/API package version: `2.1.2`.'
+          if old_intro not in text:
+              raise SystemExit('README current-version intro not found')
+          text = text.replace(old_intro, new_intro, 1)
+          text = text.replace(
+              'TeX Live / XeLaTeX / latexmk is still required for translated PDF generation.',
+              'TeX Live / `latexmk` and the selected TeX engine are still required for translated PDF generation; projects without a declaration use XeLaTeX by default.',
+              1,
+          )
+          readme.write_text(text, encoding='utf-8')
+
+          win = Path('desktop/README_zh.md')
+          text = win.read_text(encoding='utf-8').replace('v2.1.1', 'v2.1.2').replace('2.1.1', '2.1.2')
+          text = text.replace(
+              '- 要生成保持 LaTeX 排版的中文 PDF，电脑仍需安装 TeX Live，并确保 latexmk/xelatex 可从 PATH 访问。',
+              '- 要生成保持 LaTeX 排版的中文 PDF，电脑仍需安装 TeX Live，并确保 `latexmk` 与源码所声明的 TeX 引擎可从 PATH 访问；未声明时默认使用 XeLaTeX。',
+              1,
+          )
+          marker = '5. 可上传 `.zip`、`.tar`、`.tar.gz`、`.tgz` LaTeX 工程包；导入后检查文件并确认主 `.tex` 再开始处理。arXiv 或论文有 LaTeX 源码时请优先使用，结构与翻译质量更好。'
+          if marker not in text:
+              raise SystemExit('Windows archive instruction marker not found')
+          text = text.replace(marker, marker + '\n6. v2.1.2 会优先读取 arXiv `00README.json` 的 `process.compiler`，也支持 `% !TeX program = ...`；支持 pdflatex、xelatex、lualatex 和 latex，未声明或声明不受支持时保持 XeLaTeX 默认行为。', 1)
+          win.write_text(text, encoding='utf-8')
+
+          mac = Path('desktop/README_macos_zh.md')
+          text = mac.read_text(encoding='utf-8').replace('v2.1.1', 'v2.1.2').replace('2.1.1', '2.1.2')
+          text = text.replace('## v2.1.2 阅读与上传改进', '## v2.1.2 LaTeX 兼容性与阅读功能', 1)
+          heading_marker = '## v2.1.2 LaTeX 兼容性与阅读功能\n'
+          if heading_marker not in text:
+              raise SystemExit('macOS feature heading not found')
+          text = text.replace(heading_marker, heading_marker + '\n- LaTeX 工程会优先遵循 arXiv `00README.json` → `process.compiler`，并支持 `% !TeX program = ...`。支持 pdflatex、xelatex、lualatex 和 latex；没有受支持声明时继续默认使用 XeLaTeX。\n', 1)
+          text = text.replace(
+              '- 生成中文译文 PDF 仍需安装 MacTeX/TeX Live；应用会自动检测 `/Library/TeX/texbin/latexmk`。',
+              '- 生成中文译文 PDF 仍需安装 MacTeX/TeX Live；应用会自动检测 `/Library/TeX/texbin/latexmk`，并调用源码声明的 TeX 引擎（未声明时为 XeLaTeX）。',
+              1,
+          )
+          mac.write_text(text, encoding='utf-8')
+
+          upgrading = Path('docs/UPGRADING.md')
+          text = upgrading.read_text(encoding='utf-8')
+          marker = '## Upgrading from v2.1 to v2.1.1\n'
+          if marker not in text:
+              raise SystemExit('UPGRADING insertion marker not found')
+          section = '''## Upgrading from v2.1.1 to v2.1.2\n\nPaperReader v2.1.2 is a backward-compatible patch release and requires no data migration. Keep the existing `DATA_DIR`, `SQLITE_DB_NAME`, `AUTH_SECRET_KEY`, account database, and user settings.\n\nThe LaTeX compiler selector now respects supported project declarations instead of always forcing XeLaTeX. arXiv source archives may declare `00README.json` → `process.compiler`, and standalone TeX sources may use `% !TeX program = ...`. Supported values are `pdflatex`, `xelatex`, `lualatex`, and `latex`; unsupported or malformed declarations are ignored and fall back to the previous XeLaTeX default. TeX Live, `latexmk`, and whichever selected engine is needed by the source project must be installed on the host.\n\nFrontend, package-lock root metadata, API, release smoke checks, desktop documentation, and release notes are synchronized to `2.1.2`; the Git tag is `v2.1.2`. Existing v2.1.1 behavior is unchanged for projects without compiler declarations.\n\n'''
+          text = text.replace(marker, section + marker, 1)
+          upgrading.write_text(text, encoding='utf-8')
+
+          dev = Path('docs/DEVELOPMENT.md')
+          text = dev.read_text(encoding='utf-8')
+          if '2.1.1' not in text:
+              raise SystemExit('DEVELOPMENT release example version not found')
+          text = text.replace('v2.1.1', 'v2.1.2').replace('2.1.1', '2.1.2')
+          dev.write_text(text, encoding='utf-8')
+
+          notes = Path('docs/releases/v2.1.2.md')
+          text = notes.read_text(encoding='utf-8')
+          bullet = '- TeX magic-comment inspection reads only the small source header instead of loading the entire `.tex` file, avoiding unnecessary I/O and memory use on large sources.\n'
+          anchor = '- TeX sources can also declare a compiler with the conventional `% !TeX program = ...` magic comment.\n'
+          if anchor not in text:
+              raise SystemExit('release notes anchor not found')
+          notes.write_text(text.replace(anchor, anchor + bullet, 1), encoding='utf-8')
+          PY
+
+      - name: Verify current version references
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          assert json.loads(Path('frontend/package.json').read_text())['version'] == '2.1.2'
+          lock = json.loads(Path('frontend/package-lock.json').read_text())
+          assert lock['version'] == '2.1.2' and lock['packages']['']['version'] == '2.1.2'
+          assert '# PaperReader v2.1.2' in Path('README.md').read_text()
+          assert 'PaperReader v2.1.2 Windows' in Path('desktop/README_zh.md').read_text()
+          assert '# PaperReader v2.1.2 macOS' in Path('desktop/README_macos_zh.md').read_text()
+          assert '## Upgrading from v2.1.1 to v2.1.2' in Path('docs/UPGRADING.md').read_text()
+          assert '## 11.2 示例：发布 v2.1.2' in Path('docs/DEVELOPMENT.md').read_text()
+          PY
+
+      - name: Commit documentation updates
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md desktop/README_zh.md desktop/README_macos_zh.md docs/UPGRADING.md docs/DEVELOPMENT.md docs/releases/v2.1.2.md
+          git commit -m 'docs: update current documentation for v2.1.2'
+          git push origin HEAD:fix/latex-compiler-detection-v2.1.2
