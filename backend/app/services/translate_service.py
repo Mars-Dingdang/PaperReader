@@ -54,12 +54,17 @@ _MAX_CHARS_PER_CHUNK = 4000
 _LATEX_FENCE_PATTERN = re.compile(r"^```(?:latex)?\s*|\s*```$", re.MULTILINE)
 _DOCUMENT_BODY_PATTERN = re.compile(r"(?s)^(.*?\\begin\{document\})(.*?)(\\end\{document\}.*)$")
 _CJK_PACKAGE_PATTERN = re.compile(r"\\usepackage(?:\[[^\]]*\])?\{(?:ctex|xeCJK|CJKutf8|CJK)\}")
+_DECLARE_UNICODE_CHARACTER_PATTERN = re.compile(r"\\DeclareUnicodeCharacter\s*\{")
 _CJK_PREAMBLE_SNIPPET = (
     "\n% Injected by PaperReader to render Chinese translation\n"
     "\\usepackage{xeCJK}\n"
     "\\IfFontExistsTF{Songti SC}{\\setCJKmainfont{Songti SC}}{%\n"
     "  \\IfFontExistsTF{PingFang SC}{\\setCJKmainfont{PingFang SC}}{%\n"
     "    \\IfFontExistsTF{Noto Serif CJK SC}{\\setCJKmainfont{Noto Serif CJK SC}}{}}}\n"
+)
+_XELATEX_UNICODE_COMPAT_SNIPPET = (
+    "% Injected by PaperReader for pdfLaTeX source compatibility under XeLaTeX\n"
+    "\\providecommand{\\DeclareUnicodeCharacter}[2]{}\n"
 )
 
 
@@ -234,6 +239,24 @@ def _ensure_cjk_support(prefix: str) -> str:
     return prefix[:idx] + _CJK_PREAMBLE_SNIPPET + prefix[idx:]
 
 
+def _ensure_xelatex_compatibility(prefix: str) -> str:
+    """Make pdfLaTeX-only Unicode declarations harmless under XeLaTeX.
+
+    arXiv can prepend ``\\DeclareUnicodeCharacter`` before
+    ``\\documentclass``. The command is available to pdfLaTeX but undefined
+    under XeLaTeX, which handles Unicode natively. Translated projects always
+    use XeLaTeX for CJK support, so provide a no-op definition before the
+    source preamble's first declaration. Keeping the original declaration
+    intact avoids brittle parsing of its potentially nested replacement
+    argument.
+    """
+    if not _DECLARE_UNICODE_CHARACTER_PATTERN.search(prefix):
+        return prefix
+    if _XELATEX_UNICODE_COMPAT_SNIPPET.strip() in prefix:
+        return prefix
+    return _XELATEX_UNICODE_COMPAT_SNIPPET + prefix
+
+
 def _translate_latex_body(
     body_text: str,
     override_api_key: str | None = None,
@@ -274,6 +297,7 @@ def translate_latex_document(
     override_model: str | None = None,
 ) -> str:
     prefix, body, suffix = _split_latex_document(source_text)
+    prefix = _ensure_xelatex_compatibility(prefix)
     prefix = _ensure_cjk_support(prefix)
     translated = _translate_latex_body(
         body,

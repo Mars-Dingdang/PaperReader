@@ -2,7 +2,7 @@
 
 [Download Windows / macOS v2.1.3](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.3) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.3.md)
 
-v2.1.3 fixes translated-PDF compilation for source projects that declare a non-XeLaTeX compiler (e.g. arXiv `00README.json` with `pdflatex`): the declaration now applies to the original document only, while translated documents always compile with XeLaTeX, and stale `latexmk` state can no longer mask the real compile error. Frontend/API package version: `2.1.3`.
+v2.1.3 fixes translated-PDF compilation for pdfLaTeX source projects (including arXiv `2605.18309`): source compiler declarations apply only to the original document, translated documents compile with XeLaTeX, pdfLaTeX-only `\DeclareUnicodeCharacter` preambles are made XeLaTeX-compatible, and stale `latexmk` state can no longer mask the real compile error. Frontend/API package version: `2.1.3`.
 
 Windows users: extract the complete ZIP and run `PaperReader.exe`. Apple Silicon Mac users: open the DMG and copy PaperReader to Applications. Both builds show the provider setup wizard on first launch. TeX Live / `latexmk` and the selected TeX engine are still required for translated PDF generation; projects without a declaration use XeLaTeX by default. See the [Windows guide](desktop/README_zh.md) and [macOS guide](desktop/README_macos_zh.md).
 

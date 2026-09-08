@@ -417,7 +417,7 @@ v2.*
 2. Windows x64 portable 构建 + smoke test；
 3. macOS arm64 APP/DMG 构建 + smoke test；
 4. 下载两个平台的 workflow artifacts；
-5. 自动运行 `gh release create`；
+5. 自动创建新的 GitHub Release，或在同名 Release 已存在时更新说明并替换旧资产；
 6. 将 Windows ZIP、macOS DMG 和 checksum 文件作为 Release assets 上传。
 
 正式 Release 由该 GitHub Actions 流程自动发布。
@@ -617,6 +617,8 @@ gh release create v2.1.2 \
 ## Release 已创建
 
 正常情况下不要复用同一个版本号做不同内容的正式发布。应创建新版本。
+
+如果维护者明确决定修复并重新发布同一个版本，先通过 PR 将修复合并到 `main`，确认 `main` CI 通过，再将现有标签重指向新的合并提交并强制推送该标签。标签 workflow 会重新构建 Windows 与 macOS 包；发布步骤检测到同名 Release 后，会用 `gh release upload --clobber` 替换全部资产，并从 `docs/releases/<tag>.md` 更新 Release 标题和说明。不要手工混用新旧构建资产。
 
 ---
 

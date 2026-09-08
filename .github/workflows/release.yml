@@ -126,4 +126,9 @@ jobs:
         run: |
           VERSION=$(python -c "import json; print(json.load(open('frontend/package.json'))['version'])")
           test "$RELEASE_TAG" = "v$VERSION"
-          gh release create "$RELEASE_TAG" release/* --verify-tag --title "PaperReader $RELEASE_TAG" --notes-file "docs/releases/$RELEASE_TAG.md" --latest
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release/* --clobber
+            gh release edit "$RELEASE_TAG" --title "PaperReader $RELEASE_TAG" --notes-file "docs/releases/$RELEASE_TAG.md" --latest
+          else
+            gh release create "$RELEASE_TAG" release/* --verify-tag --title "PaperReader $RELEASE_TAG" --notes-file "docs/releases/$RELEASE_TAG.md" --latest
+          fi
