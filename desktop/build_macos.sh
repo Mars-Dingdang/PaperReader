@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+report_failure() {
+  local exit_code="$1"
+  local line_number="$2"
+  local failed_command="$3"
+  failed_command="${failed_command//'%'/'%25'}"
+  failed_command="${failed_command//$'\r'/'%0D'}"
+  failed_command="${failed_command//$'\n'/'%0A'}"
+  echo "::error title=macOS packaging failed::line ${line_number}: ${failed_command} (exit ${exit_code})"
+}
+trap 'report_failure "$?" "$LINENO" "$BASH_COMMAND"' ERR
+
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(cd "$PROJECT_ROOT" && node -p "require('./frontend/package.json').version")"
 ICON_SOURCE="$PROJECT_ROOT/desktop/assets/PaperReader-icon-source.png"
@@ -18,6 +29,11 @@ mkdir -p "$PROJECT_ROOT/build"
 PY2APP_LOG="$PROJECT_ROOT/build/macos-py2app.log"
 if ! python desktop/setup_macos.py py2app >"$PY2APP_LOG" 2>&1; then
   tail -120 "$PY2APP_LOG"
+  PY2APP_ERROR="$(tail -40 "$PY2APP_LOG")"
+  PY2APP_ERROR="${PY2APP_ERROR//'%'/'%25'}"
+  PY2APP_ERROR="${PY2APP_ERROR//$'\r'/'%0D'}"
+  PY2APP_ERROR="${PY2APP_ERROR//$'\n'/'%0A'}"
+  echo "::error title=py2app failed::${PY2APP_ERROR}"
   exit 1
 fi
 PYTHON_SITE="$(python -c 'import site; print(site.getsitepackages()[0])')"
