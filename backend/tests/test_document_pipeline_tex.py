@@ -45,9 +45,14 @@ Hello world.
 
     monkeypatch.setattr(document_pipeline, "compile_tex_project", fake_compile_tex_project)
     from app.services.latex_service import LatexCompileResult
+    translated_compiler_kwargs: list[dict] = []
+
+    def fake_compile_translated(tex_path: Path, output_dir: Path, **kwargs) -> LatexCompileResult:
+        translated_compiler_kwargs.append(kwargs)
+        return LatexCompileResult(fake_compile_tex_project(tex_path, output_dir))
+
     monkeypatch.setattr(
-        document_pipeline, "compile_tex_project_with_fallback",
-        lambda tex_path, output_dir: LatexCompileResult(fake_compile_tex_project(tex_path, output_dir)),
+        document_pipeline, "compile_tex_project_with_fallback", fake_compile_translated,
     )
     monkeypatch.setattr(document_pipeline, "translate_latex_document", fake_translate_latex_document)
     monkeypatch.setattr(document_pipeline, "extract_text_from_pdf", fake_extract_text_from_pdf)
@@ -59,6 +64,7 @@ Hello world.
     assert result.status == "done", result.logs
     assert nougat_called is False
     assert wrapper_called is False
+    assert translated_compiler_kwargs == [{"compiler": "xelatex"}]
     translated_tex = output_root / record.document_id / "translated.tex"
     assert translated_tex.exists()
     assert "你好，世界。" in translated_tex.read_text(encoding="utf-8")

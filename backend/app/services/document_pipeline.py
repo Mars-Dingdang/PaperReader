@@ -12,6 +12,7 @@ from app.models.store import (
     translated_pdf_filename,
 )
 from app.services.latex_service import (
+    TRANSLATED_LATEX_COMPILER,
     compile_tex_project,
     compile_tex_project_with_fallback,
     copy_pdf_to_output,
@@ -395,7 +396,9 @@ def process_document(
                 # Write translated tex next to the source so \\includegraphics resolves
                 translated_tex_in_project = record.source_path.parent / "__translated.tex"
                 translated_tex_in_project.write_text(record.translated_text, encoding="utf-8")
-                compile_result = compile_tex_project_with_fallback(translated_tex_in_project, output_dir)
+                compile_result = compile_tex_project_with_fallback(
+                    translated_tex_in_project, output_dir, compiler=TRANSLATED_LATEX_COMPILER
+                )
                 translated_pdf = compile_result.pdf_path
                 if compile_result.warning:
                     record.last_compile_warning = compile_result.warning
@@ -567,7 +570,9 @@ def process_document(
                 record.logs.append(f"Translated TEX: {translated_tex}")
 
             with with_stage(record, "latex_build"):
-                compile_result = compile_tex_project_with_fallback(translated_tex, output_dir)
+                compile_result = compile_tex_project_with_fallback(
+                    translated_tex, output_dir, compiler=TRANSLATED_LATEX_COMPILER
+                )
                 translated_pdf = compile_result.pdf_path
                 if compile_result.warning:
                     record.last_compile_warning = compile_result.warning

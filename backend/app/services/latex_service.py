@@ -39,6 +39,11 @@ _LATEXMK_ENGINE_FLAGS = {
     "lualatex": "-lualatex",
     "latex": "-pdfdvi",
 }
+# Translated documents always carry injected xeCJK/ctex preamble support
+# (translate_service._ensure_cjk_support / the ctex templates), which only
+# compiles under XeLaTeX. A source project's declared compiler applies to the
+# original document only, never to the translated one.
+TRANSLATED_LATEX_COMPILER = "xelatex"
 
 
 def _markdown_to_latex_fallback(text: str) -> str:
@@ -166,13 +171,19 @@ def _declared_latex_compiler(tex_path: Path) -> str | None:
     return None
 
 
-def _latexmk_engine_flag(tex_path: Path) -> str:
-    compiler = _declared_latex_compiler(tex_path) or _DEFAULT_LATEX_COMPILER
-    return _LATEXMK_ENGINE_FLAGS[compiler]
+def _latexmk_engine_flag(tex_path: Path, compiler: str | None = None) -> str:
+    engine = compiler or _declared_latex_compiler(tex_path) or _DEFAULT_LATEX_COMPILER
+    return _LATEXMK_ENGINE_FLAGS[engine]
 
 
-def _run_latexmk(tex_path: Path, output_dir: Path, *, force: bool) -> subprocess.CompletedProcess[str]:
-    engine_flag = _latexmk_engine_flag(tex_path)
+def _run_latexmk(
+    tex_path: Path,
+    output_dir: Path,
+    *,
+    force: bool,
+    compiler: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    engine_flag = _latexmk_engine_flag(tex_path, compiler)
     command = [
         settings.latexmk_path,
         engine_flag,
@@ -199,24 +210,38 @@ def _run_latexmk(tex_path: Path, output_dir: Path, *, force: bool) -> subprocess
     )
 
 
-def compile_tex_project_with_fallback(tex_path: Path, output_dir: Path) -> LatexCompileResult:
+def compile_tex_project_with_fallback(
+    tex_path: Path,
+    output_dir: Path,
+    *,
+    compiler: str | None = None,
+) -> LatexCompileResult:
     """Compile with strict mode first; if it fails, retry with `-f`.
 
     A lenient pass is accepted only when latexmk exits successfully and the
     expected PDF exists. A TeX engine can write an incomplete PDF before
     returning an error, and treating that artifact as success truncates whole
     papers.
+
+    ``compiler`` forces the TeX engine, overriding any declaration in the
+    source project (pass ``TRANSLATED_LATEX_COMPILER`` for translated
+    documents); ``None`` honors the declared compiler or the default.
     """
     tex_path = tex_path.resolve()
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     expected_pdf = output_dir / (tex_path.stem + ".pdf")
+    fdb_path = output_dir / f"{tex_path.stem}.fdb_latexmk"
 
     # Never let a stale or partially written PDF from an earlier failed pass
     # masquerade as the result of this compile attempt.
     expected_pdf.unlink(missing_ok=True)
+    # A .fdb_latexmk from an earlier attempt records the previous run's error
+    # state; latexmk would then run zero rules ("Nothing to do") and merely
+    # re-report the cached error instead of actually compiling.
+    fdb_path.unlink(missing_ok=True)
 
-    strict = _run_latexmk(tex_path, output_dir, force=False)
+    strict = _run_latexmk(tex_path, output_dir, force=False, compiler=compiler)
     if strict.returncode == 0 and expected_pdf.exists():
         return LatexCompileResult(expected_pdf)
 
@@ -227,9 +252,12 @@ def compile_tex_project_with_fallback(tex_path: Path, output_dir: Path) -> Latex
     logger.warning("latexmk strict pass failed (rc=%s); retrying with -f", strict.returncode)
 
     # A failed strict TeX pass may already have emitted a truncated PDF.
-    # Remove it so only a fresh, successful lenient pass can satisfy the gate.
+    # Remove it so only a fresh, successful lenient pass can satisfy the gate,
+    # and drop the strict pass's error state from the fdb so the retry
+    # actually reruns the rules instead of declaring everything up-to-date.
     expected_pdf.unlink(missing_ok=True)
-    lenient = _run_latexmk(tex_path, output_dir, force=True)
+    fdb_path.unlink(missing_ok=True)
+    lenient = _run_latexmk(tex_path, output_dir, force=True, compiler=compiler)
     if lenient.returncode == 0 and expected_pdf.exists():
         warning = (
             f"LaTeX strict compile failed but a PDF was produced via -f. "
@@ -238,15 +266,16 @@ def compile_tex_project_with_fallback(tex_path: Path, output_dir: Path) -> Latex
         logger.warning(warning)
         return LatexCompileResult(expected_pdf, warning=warning)
 
-    detail = (lenient.stderr or lenient.stdout or strict_detail or "").strip()
-    if len(detail) > 800:
-        detail = detail[-800:]
+    lenient_detail = (lenient.stderr or lenient.stdout or "").strip()
+    if len(lenient_detail) > 800:
+        lenient_detail = lenient_detail[-800:]
+    detail = " | ".join(part for part in (strict_detail, lenient_detail) if part)
     raise RuntimeError(f"LaTeX compile failed. log={log_path}. details={detail}")
 
 
-def compile_tex_project(tex_path: Path, output_dir: Path) -> Path:
+def compile_tex_project(tex_path: Path, output_dir: Path, *, compiler: str | None = None) -> Path:
     """Backwards-compatible wrapper that returns just the PDF path."""
-    return compile_tex_project_with_fallback(tex_path, output_dir).pdf_path
+    return compile_tex_project_with_fallback(tex_path, output_dir, compiler=compiler).pdf_path
 
 
 _LATEX_TEXT_ESCAPES = (

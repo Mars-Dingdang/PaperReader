@@ -15,6 +15,7 @@ from app.models.store import (
 from app.services.auth_service import User
 from app.services.latex_sanitizer import sanitize_latex_body
 from app.services.latex_service import (
+    TRANSLATED_LATEX_COMPILER,
     compile_tex_project_with_fallback,
     copy_pdf_to_output,
 )
@@ -91,7 +92,9 @@ def recompile_document_tex(
         tex_to_compile = tex_path
 
     try:
-        result = compile_tex_project_with_fallback(tex_to_compile, output_dir)
+        result = compile_tex_project_with_fallback(
+            tex_to_compile, output_dir, compiler=TRANSLATED_LATEX_COMPILER
+        )
     except Exception as exc:
         record.logs.append(f"Manual recompile failed: {exc}")
         return RecompileResponse(ok=False, error=str(exc))

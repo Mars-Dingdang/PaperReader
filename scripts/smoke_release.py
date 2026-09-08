@@ -93,7 +93,7 @@ def main():
                                        else f'Launcher exited: {process.returncode}')
                 try:
                     health = Client().json('/health')
-                    assert health['app'] == 'PaperReader' and health['version'] == '2.1.2'
+                    assert health['app'] == 'PaperReader' and health['version'] == '2.1.3'
                     return process
                 except (urllib.error.URLError, ConnectionError):
                     time.sleep(0.25)
