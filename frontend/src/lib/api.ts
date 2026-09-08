@@ -64,13 +64,45 @@ export type DocumentSummary = {
 }
 
 export type UserSettings = {
-  api_key: string
+  api_key_configured: boolean
   base_url: string
   model: string
+  pdf_parser: 'local' | 'mineru'
+  mineru_api_key_configured: boolean
+  mineru_base_url: string
+  mineru_model_version: string
+  mineru_language: string
+  mineru_enable_formula: boolean
+  mineru_enable_table: boolean
+  mineru_is_ocr: boolean
+  vision_model: string
   theme: 'light' | 'dark'
   vision_enabled: boolean
   vision_mode: 'auto' | 'manual'
   favorites: string[]
+}
+
+export type ProviderSettingsDraft = {
+  api_key: string
+  clear_api_key?: boolean
+  base_url: string
+  model: string
+  pdf_parser: 'local' | 'mineru'
+  mineru_api_key: string
+  clear_mineru_api_key?: boolean
+  mineru_base_url: string
+  mineru_model_version: string
+  mineru_language: string
+  mineru_enable_formula: boolean
+  mineru_enable_table: boolean
+  mineru_is_ocr: boolean
+  vision_model: string
+}
+
+export type SetupStatus = {
+  required: boolean
+  desktop: boolean
+  defaults?: Omit<ProviderSettingsDraft, 'api_key' | 'mineru_api_key'>
 }
 
 export type AuthUser = {
@@ -122,6 +154,11 @@ const BACKEND = (import.meta.env.VITE_BACKEND_URL || (
   import.meta.env.DEV ? 'http://localhost:8000' : ''
 )).replace(/\/$/, '')
 
+export class ApiError extends Error {
+  status?: number
+  code?: string
+}
+
 async function apiFetch(path: string, init: RequestInit = {}, expectJson = true) {
   const res = await fetch(`${BACKEND}${path}`, {
     credentials: 'include',
@@ -129,13 +166,38 @@ async function apiFetch(path: string, init: RequestInit = {}, expectJson = true)
   })
   if (!res.ok) {
     const text = await res.text()
-    const message = text || res.statusText
-    const error = new Error(message) as Error & { status?: number }
+    let message = text || res.statusText
+    let code: string | undefined
+    try {
+      const payload = JSON.parse(text)
+      const detail = payload?.detail
+      if (typeof detail === 'string') message = detail
+      else if (detail && typeof detail === 'object') {
+        message = detail.message || message
+        code = detail.code
+      }
+    } catch {
+      // Plain-text errors are already useful.
+    }
+    const error = new ApiError(message)
     error.status = res.status
+    error.code = code
     throw error
   }
   if (!expectJson) return res
   return res.json()
+}
+
+export async function getSetupStatus(): Promise<SetupStatus> {
+  return apiFetch('/api/setup/status')
+}
+
+export async function saveInitialSetup(payload: ProviderSettingsDraft): Promise<void> {
+  await apiFetch('/api/setup', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
 }
 
 export function makeDataUrl(path?: string | null): string {
@@ -201,6 +263,16 @@ export async function uploadAvatar(file: File): Promise<AuthUser> {
 
 export async function updateSettings(payload: Partial<UserSettings>): Promise<UserSettings> {
   return apiFetch('/api/settings/me', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+}
+
+export async function updateProviderSettings(
+  payload: Partial<ProviderSettingsDraft>
+): Promise<UserSettings> {
+  return apiFetch('/api/settings/me/providers', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)

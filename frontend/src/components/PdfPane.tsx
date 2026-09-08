@@ -1,5 +1,8 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
-import { Document, Page } from 'react-pdf'
+import { Document, Page, pdfjs } from 'react-pdf'
+import 'react-pdf/dist/Page/AnnotationLayer.css'
+import 'react-pdf/dist/Page/TextLayer.css'
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import {
   ChevronLeft,
   ChevronRight,
@@ -28,6 +31,8 @@ type Props = {
     pageCount: number
   }) => void
 }
+
+pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl
 
 export type PdfPaneHandle = {
   locateAndHighlight: (payload: { text: string; positionRatio: number }) => Promise<void>

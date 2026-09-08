@@ -9,10 +9,9 @@ backend_dir = project_root / "backend"
 conda_bin = Path(sys.prefix) / "Library" / "bin"
 sys.path.insert(0, str(backend_dir))
 
-hiddenimports = []
+hiddenimports = ["webview.platforms.edgechromium"]
 datas = [
     (str(project_root / "frontend" / "dist"), "frontend_dist"),
-    (str(project_root / ".env.example"), "."),
     (str(project_root / "desktop" / "assets" / "PaperReader.ico"), "."),
 ]
 datas += collect_data_files("pypdfium2")

@@ -14,7 +14,8 @@ export function AuthScreen({ onAuthenticated }: Props) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  async function handleSubmit() {
+  async function handleSubmit(event?: React.FormEvent) {
+    event?.preventDefault()
     if (!username.trim() || !password) {
       setError('请输入账号和密码。')
       return
@@ -54,7 +55,7 @@ export function AuthScreen({ onAuthenticated }: Props) {
             <span className="brand-dot" />
             PaperReader
           </div>
-          <h1>登录后继续你的论文工作流</h1>
+          <h1>登录后，继续你的论文工作流</h1>
           <p>
             每个账号会保留处理历史、收藏、视觉校验偏好和个人 LLM 配置。上传过的文档可以随时继续打开。
           </p>
@@ -87,7 +88,7 @@ export function AuthScreen({ onAuthenticated }: Props) {
             </button>
           </div>
 
-          <div className="auth-form">
+          <form className="auth-form" onSubmit={(event) => void handleSubmit(event)}>
             <label className="field">
               <span>账号</span>
               <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="输入用户名" />
@@ -126,7 +127,7 @@ export function AuthScreen({ onAuthenticated }: Props) {
 
             {error && <div className="form-error">{error}</div>}
 
-            <button className="btn primary auth-submit" disabled={busy} onClick={() => void handleSubmit()}>
+            <button type="submit" className="btn primary auth-submit" disabled={busy}>
               {busy ? '处理中…' : mode === 'login' ? '登录' : '注册并进入'}
             </button>
 
@@ -135,7 +136,7 @@ export function AuthScreen({ onAuthenticated }: Props) {
                 ? '没有账号？切换到注册即可创建本地账户。'
                 : '注册后会自动登录，并建议先到个人中心填写 API Key。'}
             </div>
-          </div>
+          </form>
         </div>
       </div>
     </div>

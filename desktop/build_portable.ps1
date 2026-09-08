@@ -44,7 +44,6 @@ try {
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
 
 $PortableDir = Join-Path $ProjectRoot "dist\PaperReader"
-Copy-Item -LiteralPath (Join-Path $ProjectRoot ".env.example") -Destination (Join-Path $PortableDir "config.env") -Force
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "desktop\README_zh.md") -Destination (Join-Path $PortableDir "使用说明.txt") -Force
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "desktop\create_shortcut.ps1") -Destination $PortableDir -Force
 

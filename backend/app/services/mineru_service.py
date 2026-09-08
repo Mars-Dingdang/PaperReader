@@ -46,6 +46,33 @@ class MinerUResult:
     two_column: bool = False
 
 
+@dataclass(frozen=True)
+class MinerUConfig:
+    api_key: str
+    base_url: str
+    model_version: str
+    language: str
+    enable_formula: bool
+    enable_table: bool
+    is_ocr: bool
+    poll_interval: float
+    timeout: float
+
+
+def _default_config() -> MinerUConfig:
+    return MinerUConfig(
+        api_key=settings.mineru_api_key,
+        base_url=settings.mineru_base_url,
+        model_version=settings.mineru_model_version,
+        language=settings.mineru_language,
+        enable_formula=settings.mineru_enable_formula,
+        enable_table=settings.mineru_enable_table,
+        is_ocr=settings.mineru_is_ocr,
+        poll_interval=settings.mineru_poll_interval,
+        timeout=settings.mineru_timeout,
+    )
+
+
 _PDF_LAYER_WHITESPACE_PATTERN = re.compile(r"[ \t]+")
 
 
@@ -287,13 +314,14 @@ def extract_structured_from_pdf_local(
 # MinerU client
 # ---------------------------------------------------------------------------
 
-def _auth_headers() -> dict[str, str]:
-    if not settings.mineru_api_key:
+def _auth_headers(config: MinerUConfig | None = None) -> dict[str, str]:
+    config = config or _default_config()
+    if not config.api_key:
         raise RuntimeError(
             "MINERU_API_KEY is not configured. Set it in your .env to enable PDF parsing via MinerU."
         )
     return {
-        "Authorization": f"Bearer {settings.mineru_api_key}",
+        "Authorization": f"Bearer {config.api_key}",
         "Accept": "*/*",
     }
 
@@ -312,18 +340,19 @@ def _check_mineru_response(resp: requests.Response, action: str) -> dict:
     return payload
 
 
-def _request_upload_url(file_name: str) -> tuple[str, str]:
+def _request_upload_url(file_name: str, config: MinerUConfig | None = None) -> tuple[str, str]:
     """Apply for a signed OSS upload URL. Returns (batch_id, upload_url)."""
-    url = f"{settings.mineru_base_url.rstrip('/')}/file-urls/batch"
+    config = config or _default_config()
+    url = f"{config.base_url.rstrip('/')}/file-urls/batch"
     body = {
         "files": [{"name": file_name}],
-        "model_version": settings.mineru_model_version,
-        "language": settings.mineru_language,
-        "enable_formula": settings.mineru_enable_formula,
-        "enable_table": settings.mineru_enable_table,
-        "is_ocr": settings.mineru_is_ocr,
+        "model_version": config.model_version,
+        "language": config.language,
+        "enable_formula": config.enable_formula,
+        "enable_table": config.enable_table,
+        "is_ocr": config.is_ocr,
     }
-    headers = {**_auth_headers(), "Content-Type": "application/json"}
+    headers = {**_auth_headers(config), "Content-Type": "application/json"}
     resp = requests.post(url, json=body, headers=headers, timeout=60)
     payload = _check_mineru_response(resp, "apply upload URL")
     data = payload.get("data") or {}
@@ -345,12 +374,14 @@ def _poll_batch(
     batch_id: str,
     log_sink: list[str] | None = None,
     progress_cb: Callable[[float, str], None] | None = None,
+    config: MinerUConfig | None = None,
 ) -> str:
     """Poll until the (single) extract result is done. Returns full_zip_url."""
-    url = f"{settings.mineru_base_url.rstrip('/')}/extract-results/batch/{batch_id}"
-    headers = _auth_headers()
-    interval = max(1.0, float(settings.mineru_poll_interval))
-    deadline = time.time() + max(30.0, float(settings.mineru_timeout))
+    config = config or _default_config()
+    url = f"{config.base_url.rstrip('/')}/extract-results/batch/{batch_id}"
+    headers = _auth_headers(config)
+    interval = max(1.0, float(config.poll_interval))
+    deadline = time.time() + max(30.0, float(config.timeout))
     last_state = ""
 
     # Map MinerU's coarse states onto sub-stage fractions so the progress bar
@@ -386,7 +417,7 @@ def _poll_batch(
             raise RuntimeError(f"MinerU parsing failed: {result.get('err_msg', 'unknown')}")
         time.sleep(interval)
 
-    raise RuntimeError(f"MinerU polling timed out after {settings.mineru_timeout}s (last state: {last_state})")
+    raise RuntimeError(f"MinerU polling timed out after {config.timeout}s (last state: {last_state})")
 
 
 def _download_and_extract_zip(
@@ -511,6 +542,7 @@ def extract_text_from_pdf(
     output_dir: Path,
     log_sink: list[str] | None = None,
     progress_cb: Callable[[float, str], None] | None = None,
+    config: MinerUConfig | None = None,
 ) -> tuple[str, str, list[Path]]:
     """Submit `pdf_path` to MinerU and return (markdown_text, mode_label, artifacts).
 
@@ -523,7 +555,8 @@ def extract_text_from_pdf(
     parse stage) so the UI can show progress during the slow upload/poll phases.
     """
     file_name = Path(pdf_path).name
-    batch_id, upload_url = _request_upload_url(file_name)
+    config = config or _default_config()
+    batch_id, upload_url = _request_upload_url(file_name, config)
     if log_sink is not None:
         log_sink.append(f"MinerU batch_id: {batch_id}")
     if progress_cb is not None:
@@ -533,9 +566,9 @@ def extract_text_from_pdf(
         log_sink.append("MinerU upload complete; polling for result")
     if progress_cb is not None:
         progress_cb(0.5, "文件上传完成，等待解析")
-    zip_url = _poll_batch(batch_id, log_sink=log_sink, progress_cb=progress_cb)
+    zip_url = _poll_batch(batch_id, log_sink=log_sink, progress_cb=progress_cb, config=config)
     md_text, extracted = _download_and_extract_zip(zip_url, output_dir, log_sink=log_sink)
-    mode_label = f"mineru:{settings.mineru_model_version}"
+    mode_label = f"mineru:{config.model_version}"
     return md_text, mode_label, extracted
 
 
@@ -589,6 +622,7 @@ def extract_structured_from_pdf(
     output_dir: Path,
     log_sink: list[str] | None = None,
     progress_cb: Callable[[float, str], None] | None = None,
+    config: MinerUConfig | None = None,
 ) -> MinerUResult:
     """Same as `extract_text_from_pdf` but also surfaces structured artifacts.
 
@@ -597,7 +631,7 @@ def extract_structured_from_pdf(
     should fall back to the markdown-only path.
     """
     md_text, mode_label, extracted = extract_text_from_pdf(
-        pdf_path, output_dir, log_sink=log_sink, progress_cb=progress_cb
+        pdf_path, output_dir, log_sink=log_sink, progress_cb=progress_cb, config=config
     )
 
     content_blocks: list[dict] | None = None

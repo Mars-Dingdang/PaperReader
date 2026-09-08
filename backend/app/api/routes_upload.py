@@ -7,17 +7,17 @@ from app.api.deps import get_current_user
 from app.core.config import settings
 from app.models.schemas import UploadResponse
 from app.models.store import get_document
-from app.services.auth_service import User
+from app.services.auth_service import User, ensure_user_settings, require_provider_settings
 from app.services.document_pipeline import create_document_record, process_document
 
 
 router = APIRouter()
 
 
-def _run_pipeline(record_id: str) -> None:
+def _run_pipeline(record_id: str, user_id: int) -> None:
     record = get_document(record_id)
     if record:
-        process_document(record)
+        process_document(record, provider_settings=ensure_user_settings(user_id))
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -28,6 +28,7 @@ async def upload(
     vision_check_mode: str = Form("auto"),
     user: User = Depends(get_current_user),
 ) -> UploadResponse:
+    require_provider_settings(user.id)
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in {".pdf", ".tex"}:
         raise HTTPException(status_code=400, detail="Only .pdf and .tex are supported in MVP")
@@ -42,5 +43,5 @@ async def upload(
     record.vision_check_enabled = bool(vision_check_enabled)
     record.vision_check_mode = vision_check_mode if vision_check_mode in ("auto", "manual") else "auto"
 
-    background_tasks.add_task(_run_pipeline, record.document_id)
+    background_tasks.add_task(_run_pipeline, record.document_id, user.id)
     return UploadResponse(document_id=record.document_id, status=record.status)

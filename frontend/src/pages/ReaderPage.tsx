@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
-import { PanelLeftOpen, PanelRightOpen } from 'lucide-react'
+import { AlertCircle, PanelLeftOpen, PanelRightOpen, UploadCloud } from 'lucide-react'
 import { ChatPanel } from '../components/ChatPanel'
 import { LiteratureChatPage } from '../components/LiteratureChatPage'
 import { PdfPane } from '../components/PdfPane'
@@ -38,30 +38,30 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
   const [activeId, setActiveId] = useState<string | undefined>(undefined)
   const [docCache, setDocCache] = useState<Record<string, DocumentStatus>>({})
   const [uploading, setUploading] = useState(false)
-  const [showSidebar, setShowSidebar] = useState(true)
-  const [showChat, setShowChat] = useState(true)
+  const [showSidebar, setShowSidebar] = useState(() => window.innerWidth >= 900)
+  const [showChat, setShowChat] = useState(() => window.innerWidth >= 1100)
   const [overrideLeft, setOverrideLeft] = useState<OverridePdf>(null)
   const [overrideRight, setOverrideRight] = useState<OverridePdf>(null)
   const [projectOpen, setProjectOpen] = useState(false)
-  const [profileOpen, setProfileOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(!user.settings.api_key_configured)
   const [editTexOpen, setEditTexOpen] = useState(false)
-  const [settingsLoaded, setSettingsLoaded] = useState(false)
   const [theme, setTheme] = useState<UserSettings['theme']>(user.settings.theme)
   const [visionEnabled, setVisionEnabled] = useState(user.settings.vision_enabled)
   const [visionMode, setVisionMode] = useState<UserSettings['vision_mode']>(user.settings.vision_mode)
   const [favorites, setFavorites] = useState<string[]>(user.settings.favorites)
   const [literatureChatOpen, setLiteratureChatOpen] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
 
   const pollTimerRef = useRef<number | null>(null)
   const originalPaneRef = useRef<PdfPaneHandle | null>(null)
   const translatedPaneRef = useRef<PdfPaneHandle | null>(null)
+  const emptyUploadRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     setTheme(user.settings.theme)
     setVisionEnabled(user.settings.vision_enabled)
     setVisionMode(user.settings.vision_mode)
     setFavorites(user.settings.favorites)
-    setSettingsLoaded(true)
   }, [user])
 
   useEffect(() => {
@@ -69,33 +69,38 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
   }, [theme])
 
   useEffect(() => {
-    if (!settingsLoaded) return
-    void (async () => {
-      try {
-        const nextSettings = await updateSettings({
-          theme,
-          vision_enabled: visionEnabled,
-          vision_mode: visionMode,
-          favorites
-        })
-        onUserChange({ ...user, settings: nextSettings })
-      } catch (e) {
-        console.error(e)
-      }
-    })()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [theme, visionEnabled, visionMode, favorites])
+    const handleResize = () => {
+      if (window.innerWidth < 900) setShowSidebar(false)
+      if (window.innerWidth < 1100) setShowChat(false)
+    }
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+
+  const persistPreferences = useCallback(async (payload: Partial<UserSettings>) => {
+    try {
+      const nextSettings = await updateSettings(payload)
+      onUserChange({ ...user, settings: nextSettings })
+    } catch (e: any) {
+      setNotice(`偏好保存失败：${e?.message || String(e)}`)
+    }
+  }, [onUserChange, user])
 
   const cycleVision = useCallback(() => {
+    let nextEnabled = visionEnabled
+    let nextMode = visionMode
     if (!visionEnabled) {
-      setVisionEnabled(true)
-      setVisionMode('auto')
+      nextEnabled = true
+      nextMode = 'auto'
     } else if (visionMode === 'auto') {
-      setVisionMode('manual')
+      nextMode = 'manual'
     } else {
-      setVisionEnabled(false)
+      nextEnabled = false
     }
-  }, [visionEnabled, visionMode])
+    setVisionEnabled(nextEnabled)
+    setVisionMode(nextMode)
+    void persistPreferences({ vision_enabled: nextEnabled, vision_mode: nextMode })
+  }, [persistPreferences, visionEnabled, visionMode])
 
   const refreshActive = useCallback(() => {
     if (!activeId) return
@@ -187,7 +192,8 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
       setLiteratureChatOpen(false)
       await refreshSummaries()
     } catch (e: any) {
-      alert(`上传失败：${e?.message ?? String(e)}`)
+      if (e?.code === 'config_required') setProfileOpen(true)
+      setNotice(`上传失败：${e?.message ?? String(e)}`)
     } finally {
       setUploading(false)
     }
@@ -199,10 +205,10 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
   }, [refreshSummaries])
 
   const handleToggleFavorite = useCallback((docId: string) => {
-    setFavorites((prev) =>
-      prev.includes(docId) ? prev.filter((x) => x !== docId) : [...prev, docId]
-    )
-  }, [])
+    const next = favorites.includes(docId) ? favorites.filter((x) => x !== docId) : [...favorites, docId]
+    setFavorites(next)
+    void persistPreferences({ favorites: next })
+  }, [favorites, persistPreferences])
 
   const handleDelete = useCallback(async (docId: string) => {
     if (!window.confirm('删除这条历史记录？对应文件不会从系统默认输出目录移除。')) return
@@ -213,13 +219,15 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
         delete next[docId]
         return next
       })
-      setFavorites((prev) => prev.filter((item) => item !== docId))
+      const nextFavorites = favorites.filter((item) => item !== docId)
+      setFavorites(nextFavorites)
+      void persistPreferences({ favorites: nextFavorites })
       setSummaries((prev) => prev.filter((item) => item.document_id !== docId))
       setActiveId((prev) => (prev === docId ? undefined : prev))
     } catch (e: any) {
       alert(`删除失败：${e?.message ?? String(e)}`)
     }
-  }, [])
+  }, [favorites, persistPreferences])
 
   const handleRename = useCallback(async (documentId: string, name: string) => {
     try {
@@ -284,6 +292,7 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
 
   return (
     <div className="app-shell">
+      {notice && <div className="app-notice" role="alert"><AlertCircle size={16} /><span>{notice}</span><button aria-label="关闭提示" onClick={() => setNotice(null)}>×</button></div>}
       {showSidebar ? (
         <Sidebar
           user={user}
@@ -314,7 +323,11 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
           onLogout={() => void handleLogout()}
           onToggleChat={() => setShowChat((v) => !v)}
           onToggleVision={cycleVision}
-          onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+          onToggleTheme={() => {
+            const next = theme === 'dark' ? 'light' : 'dark'
+            setTheme(next)
+            void persistPreferences({ theme: next })
+          }}
           onRefreshStatus={refreshActive}
           onOpenLiteratureChat={() => setLiteratureChatOpen(true)}
           literatureChatOpen={literatureChatOpen}
@@ -348,8 +361,13 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
         )}
         {!activeId ? (
           <div className="workspace-empty">
+            <div className="empty-illustration"><UploadCloud size={32} /></div>
+            <span className="eyebrow">你的本地论文工作台</span>
             <h2>欢迎回来，{user.username}</h2>
-            <p className="muted">点击左侧「新解析」上传 PDF 或 TeX 文件开始</p>
+            <p className="muted">上传 PDF 或 TeX，PaperReader 会保留原文排版并生成可对照阅读的译文。</p>
+            <input ref={emptyUploadRef} type="file" accept=".pdf,.tex" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void handleUpload(file); event.currentTarget.value = '' }} />
+            <div className="empty-actions"><button className="btn primary" disabled={uploading} onClick={() => emptyUploadRef.current?.click()}>{uploading ? '正在上传…' : '选择论文'}</button><button className="btn" onClick={() => setProjectOpen(true)}>导入 TeX 项目</button></div>
+            {!user.settings.api_key_configured && <button className="config-callout" onClick={() => setProfileOpen(true)}><AlertCircle size={16} />开始前需要配置 AI 服务</button>}
           </div>
         ) : (
           <>

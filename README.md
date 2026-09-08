@@ -1,17 +1,18 @@
-# PaperReader v2.0
+# PaperReader v2.1
 
-[Download Windows v2.0](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.0) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.0.md)
+[Download Windows / macOS v2.1](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.md)
 
-v2.0 brings persistent per-user reading and literature chat, more reliable full-document translation, aligned PDF navigation, and a portable Windows application. The previous main branch is preserved as `v1.0` and `release/v1.0`. Frontend/API package version: `2.0.0`.
+v2.1 adds secure in-app provider setup, per-account LLM/MinerU configuration, native Windows and Apple Silicon macOS windows, and a responsive UI refresh. Frontend/API package version: `2.1.0`.
 
-Windows users: extract the complete release ZIP and run `PaperReader.exe`. TeX Live / XeLaTeX / latexmk is still required for translated PDF generation. See [the Windows guide](desktop/README_zh.md).
+Windows users: extract the complete ZIP and run `PaperReader.exe`. Apple Silicon Mac users: open the DMG and copy PaperReader to Applications. Both builds show the provider setup wizard on first launch. TeX Live / XeLaTeX / latexmk is still required for translated PDF generation. See the [Windows guide](desktop/README_zh.md) and [macOS guide](desktop/README_macos_zh.md).
 
 ![](./images/demo1.png)
 
 A full-stack application for bilingual paper reading:
 - Username/password account system with login, registration, remember-me session, and a personal center
 - User-scoped persistent history backed by local SQLite; processed files can be reopened after restart
-- Personal center for avatar upload, password change, and per-user LLM settings (`API Key` / `Base URL` / `Model`)
+- First-run desktop wizard for LLM, MinerU, parser, and vision-model setup; secrets move into encrypted per-user storage after sign-in
+- Personal center for avatar/password changes and per-user LLM + MinerU settings; saved keys are never returned to the frontend
 - Upload `.pdf`, single `.tex`, or a multi-file TeX project (Phase B)
 - Parse PDF via the [MinerU](https://mineru.net/apiManage/docs) cloud API (精准解析, Bearer token)
 - Concurrent LLM translation (Phase 优化) with placeholder protection, jittered retry and `Retry-After` honoring
@@ -26,6 +27,7 @@ A full-stack application for bilingual paper reading:
 - Artifact panel with scrolling, hover thumbnail preview, and drag-into-PDF-pane (Phase C)
 - Chat with paper context via OpenAI-compatible API; full Markdown + GitHub-flavored tables + KaTeX math + soft line breaks for both user and assistant bubbles
 - **Light / dark theme**: persists per user account via backend settings
+- Native WebView2 (Windows) and WKWebView (macOS arm64) desktop applications with persistent local sessions
 - Sidebar toolbar consolidates Chat-visibility / Vision-check tri-state / Status-refresh / Theme buttons; collapsing the sidebar only hides the sidebar (the PDF + chat workspace keeps the full width)
 - Premium interactions: generated-file list, reference preview, and template prompts (Highlight/Baseline/Limitations)
 
@@ -250,7 +252,8 @@ python -m compileall backend/app     # 快速语法检查
   - theme
   - vision-check preference
   - favorites
-  - personal `API Key` / `Base URL` / `Model`
+  - personal LLM `API Key` / `Base URL` / `Model`
+  - personal parser, MinerU key/options, and vision model
 
 ### Personal center
 

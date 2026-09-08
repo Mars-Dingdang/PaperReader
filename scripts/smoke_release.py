@@ -44,6 +44,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--archive', type=Path)
+    mode.add_argument('--app', type=Path, help='Test a built macOS .app bundle')
     mode.add_argument('--web', action='store_true', help='Test the ordinary web server without desktop overrides')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -56,7 +57,8 @@ def main():
                 assert not any(name.startswith('data/') or name.endswith('paperreader.db') for name in names)
                 archive.extractall(base)
             command = [str(base / 'PaperReader.exe')]
-            assert (base / 'config.env').is_file()
+        elif args.app:
+            command = [str(args.app.resolve() / 'Contents' / 'MacOS' / 'PaperReader')]
         elif args.web:
             command = [sys.executable, '-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000']
         else:
@@ -84,7 +86,7 @@ def main():
                                        else f'Launcher exited: {process.returncode}')
                 try:
                     health = Client().json('/health')
-                    assert health['app'] == 'PaperReader' and health['version'] == '2.0.0'
+                    assert health['app'] == 'PaperReader' and health['version'] == '2.1.0'
                     return process
                 except (urllib.error.URLError, ConnectionError):
                     time.sleep(0.25)
@@ -151,7 +153,7 @@ def main():
             stop(process)
             process = start()
             assert first.json('/api/auth/me')['settings']['theme'] == 'dark'
-            assert first.json('/api/auth/me')['settings']['api_key'] == 'local-test-key'
+            assert first.json('/api/auth/me')['settings']['api_key_configured'] is True
             assert first.json('/api/documents')[0]['document_id'] == document_id
             assert first.json('/api/chat/sessions/' + session['session_id'])['title'] == 'Smoke conversation'
             first.json('/api/auth/logout', {}, 'POST')

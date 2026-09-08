@@ -15,6 +15,7 @@ from app.services.auth_service import (
     register_user,
     revoke_session,
     save_avatar,
+    serialize_settings,
     serialize_me,
     update_profile,
     update_user_settings,
@@ -45,6 +46,7 @@ class ChangePasswordRequest(BaseModel):
 
 
 class UpdateSettingsRequest(BaseModel):
+    # Kept for clients from PaperReader 2.0; new clients use /providers.
     api_key: str | None = None
     base_url: str | None = None
     model: str | None = None
@@ -52,6 +54,23 @@ class UpdateSettingsRequest(BaseModel):
     vision_enabled: bool | None = None
     vision_mode: str | None = None
     favorites: list[str] | None = None
+
+
+class UpdateProviderSettingsRequest(BaseModel):
+    api_key: str | None = None
+    clear_api_key: bool = False
+    base_url: str | None = None
+    model: str | None = None
+    pdf_parser: str | None = None
+    mineru_api_key: str | None = None
+    clear_mineru_api_key: bool = False
+    mineru_base_url: str | None = None
+    mineru_model_version: str | None = None
+    mineru_language: str | None = None
+    mineru_enable_formula: bool | None = None
+    mineru_enable_table: bool | None = None
+    mineru_is_ocr: bool | None = None
+    vision_model: str | None = None
 
 
 def _set_session_cookie(response: Response, token: str, remember_me: bool) -> None:
@@ -128,12 +147,29 @@ def put_settings(payload: UpdateSettingsRequest, user: User = Depends(get_curren
         vision_mode=payload.vision_mode,
         favorites=payload.favorites,
     )
-    return {
-        "api_key": settings_row.api_key,
-        "base_url": settings_row.base_url,
-        "model": settings_row.model,
-        "theme": settings_row.theme,
-        "vision_enabled": settings_row.vision_enabled,
-        "vision_mode": settings_row.vision_mode,
-        "favorites": settings_row.favorites,
-    }
+    return serialize_settings(settings_row)
+
+
+@router.put("/settings/me/providers")
+def put_provider_settings(
+    payload: UpdateProviderSettingsRequest,
+    user: User = Depends(get_current_user),
+) -> dict:
+    settings_row = update_user_settings(
+        user.id,
+        api_key=payload.api_key,
+        clear_api_key=payload.clear_api_key,
+        base_url=payload.base_url,
+        model=payload.model,
+        pdf_parser=payload.pdf_parser,
+        mineru_api_key=payload.mineru_api_key,
+        clear_mineru_api_key=payload.clear_mineru_api_key,
+        mineru_base_url=payload.mineru_base_url,
+        mineru_model_version=payload.mineru_model_version,
+        mineru_language=payload.mineru_language,
+        mineru_enable_formula=payload.mineru_enable_formula,
+        mineru_enable_table=payload.mineru_enable_table,
+        mineru_is_ocr=payload.mineru_is_ocr,
+        vision_model=payload.vision_model,
+    )
+    return serialize_settings(settings_row)

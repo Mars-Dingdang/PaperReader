@@ -70,10 +70,10 @@ def _image_to_data_url(path: Path) -> str:
     return f"data:image/png;base64,{encoded}"
 
 
-def _vision_client() -> OpenAI:
+def _vision_client(api_key: str, base_url: str) -> OpenAI:
     return OpenAI(
-        api_key=settings.openai_api_key or "EMPTY",
-        base_url=settings.openai_base_url,
+        api_key=api_key or "EMPTY",
+        base_url=base_url,
     )
 
 
@@ -95,17 +95,24 @@ def _parse_json_response(content: str) -> dict | None:
             return None
 
 
-def _check_one_page(image_path: Path, markdown: str) -> tuple[bool, str, list[str]]:
-    if not settings.openai_api_key:
+def _check_one_page(
+    image_path: Path,
+    markdown: str,
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+) -> tuple[bool, str, list[str]]:
+    if not api_key:
         return True, markdown, []
-    client = _vision_client()
+    client = _vision_client(api_key, base_url)
     user_content = [
         {"type": "text", "text": f"以下是 markdown 文本：\n\n{markdown}"},
         {"type": "image_url", "image_url": {"url": _image_to_data_url(image_path)}},
     ]
     try:
         response = client.chat.completions.create(
-            model=settings.vision_model,
+            model=model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
@@ -133,6 +140,9 @@ def run_vision_check_on_markdown(
     pdf_path: Path,
     text: str,
     output_dir: Path,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
 ) -> str:
     """Run the visual-vs-text check.
 
@@ -152,7 +162,10 @@ def run_vision_check_on_markdown(
         record.logs.append("Vision check skipped: pypdfium2 unavailable or render failed")
         return text
 
-    record.logs.append(f"Vision check: {len(pages)} page(s) using {settings.vision_model}")
+    selected_api_key = settings.openai_api_key if api_key is None else api_key
+    selected_base_url = settings.openai_base_url if base_url is None else base_url
+    selected_model = settings.vision_model if model is None else model
+    record.logs.append(f"Vision check: {len(pages)} page(s) using {selected_model}")
 
     # Use the same markdown for every page (segmentation by page is non-trivial
     # without coordinate metadata).  The model is instructed to focus on the
@@ -161,7 +174,13 @@ def run_vision_check_on_markdown(
     refined = text
     for idx, page in enumerate(pages):
         try:
-            ok, fixed, issues = _check_one_page(page, refined)
+            ok, fixed, issues = _check_one_page(
+                page,
+                refined,
+                api_key=selected_api_key,
+                base_url=selected_base_url,
+                model=selected_model,
+            )
         except Exception as exc:
             record.logs.append(f"Vision check page {idx + 1} error: {exc}")
             continue

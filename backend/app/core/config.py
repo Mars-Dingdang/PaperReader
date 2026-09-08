@@ -24,6 +24,7 @@ class Settings(BaseSettings):
             self.pdf_parser = "mineru" if self.mineru_api_key else "local"
 
     app_env: str = Field(default="dev", alias="APP_ENV")
+    desktop_mode: bool = Field(default=False, alias="PAPERREADER_DESKTOP")
 
     data_dir: Path = Field(default=Path("../data"), alias="DATA_DIR")
     upload_dir_name: str = Field(default="uploads", alias="UPLOAD_DIR_NAME")
@@ -98,6 +99,27 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def apply_runtime_provider_values(values: dict[str, object]) -> None:
+    """Keep bootstrap defaults usable until they are claimed by an account."""
+    mapping = {
+        "api_key": "openai_api_key",
+        "base_url": "openai_base_url",
+        "model": "openai_model",
+        "pdf_parser": "pdf_parser",
+        "mineru_api_key": "mineru_api_key",
+        "mineru_base_url": "mineru_base_url",
+        "mineru_model_version": "mineru_model_version",
+        "mineru_language": "mineru_language",
+        "mineru_enable_formula": "mineru_enable_formula",
+        "mineru_enable_table": "mineru_enable_table",
+        "mineru_is_ocr": "mineru_is_ocr",
+        "vision_model": "vision_model",
+    }
+    for source, target in mapping.items():
+        if source in values:
+            setattr(settings, target, values[source])
 
 settings.upload_dir.mkdir(parents=True, exist_ok=True)
 settings.output_dir.mkdir(parents=True, exist_ok=True)

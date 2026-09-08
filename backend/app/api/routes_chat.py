@@ -8,7 +8,7 @@ from app.models.schemas import (
     CreateChatSessionRequest,
 )
 from app.models.store import list_documents_for_user
-from app.services.auth_service import User, ensure_user_settings
+from app.services.auth_service import User, ensure_user_settings, require_provider_settings
 from app.services.chat_store import (
     append_message,
     create_session,
@@ -126,6 +126,8 @@ def chat(
     )
 
     user_settings = ensure_user_settings(user.id)
+    if not payload.override_api_key:
+        user_settings = require_provider_settings(user.id)
     answer = llm_client.chat(
         message=user_message,
         system_prompt=system_prompt,

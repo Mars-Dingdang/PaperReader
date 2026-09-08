@@ -6,6 +6,7 @@ import hmac
 import json
 import secrets
 import uuid
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,6 +15,10 @@ from fastapi import HTTPException
 
 from app.core.config import settings
 from app.core.database import db_cursor
+from app.core.local_config import clear_bootstrap_secrets, pending_bootstrap_provider
+
+
+_BOOTSTRAP_LOCK = threading.Lock()
 
 
 def _utcnow() -> datetime:
@@ -120,6 +125,15 @@ class UserSettings:
     api_key: str
     base_url: str
     model: str
+    pdf_parser: str
+    mineru_api_key: str
+    mineru_base_url: str
+    mineru_model_version: str
+    mineru_language: str
+    mineru_enable_formula: bool
+    mineru_enable_table: bool
+    mineru_is_ocr: bool
+    vision_model: str
     theme: str
     vision_enabled: bool
     vision_mode: str
@@ -146,6 +160,15 @@ def _default_settings(user_id: int) -> UserSettings:
         api_key="",
         base_url=settings.openai_base_url,
         model=settings.openai_model,
+        pdf_parser=settings.pdf_parser or "local",
+        mineru_api_key="",
+        mineru_base_url=settings.mineru_base_url,
+        mineru_model_version=settings.mineru_model_version,
+        mineru_language=settings.mineru_language,
+        mineru_enable_formula=settings.mineru_enable_formula,
+        mineru_enable_table=settings.mineru_enable_table,
+        mineru_is_ocr=settings.mineru_is_ocr,
+        vision_model=settings.vision_model,
         theme="light",
         vision_enabled=True,
         vision_mode="auto",
@@ -167,6 +190,15 @@ def ensure_user_settings(user_id: int) -> UserSettings:
                 api_key=decrypt_secret(row["llm_api_key_enc"]),
                 base_url=row["llm_base_url"] or settings.openai_base_url,
                 model=row["llm_model"] or settings.openai_model,
+                pdf_parser=row["pdf_parser"] or "local",
+                mineru_api_key=decrypt_secret(row["mineru_api_key_enc"]),
+                mineru_base_url=row["mineru_base_url"] or settings.mineru_base_url,
+                mineru_model_version=row["mineru_model_version"] or settings.mineru_model_version,
+                mineru_language=row["mineru_language"] or settings.mineru_language,
+                mineru_enable_formula=bool(row["mineru_enable_formula"]),
+                mineru_enable_table=bool(row["mineru_enable_table"]),
+                mineru_is_ocr=bool(row["mineru_is_ocr"]),
+                vision_model=row["vision_model"] or settings.vision_model,
                 theme=row["theme"] or "light",
                 vision_enabled=bool(row["vision_enabled"]),
                 vision_mode=row["vision_mode"] or "auto",
@@ -179,15 +211,27 @@ def ensure_user_settings(user_id: int) -> UserSettings:
         conn.execute(
             """
             INSERT INTO user_settings (
-                user_id, llm_api_key_enc, llm_base_url, llm_model, theme,
+                user_id, llm_api_key_enc, llm_base_url, llm_model,
+                pdf_parser, mineru_api_key_enc, mineru_base_url,
+                mineru_model_version, mineru_language, mineru_enable_formula,
+                mineru_enable_table, mineru_is_ocr, vision_model, theme,
                 vision_enabled, vision_mode, favorites_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
                 "",
                 settings_row.base_url,
                 settings_row.model,
+                settings_row.pdf_parser,
+                "",
+                settings_row.mineru_base_url,
+                settings_row.mineru_model_version,
+                settings_row.mineru_language,
+                1 if settings_row.mineru_enable_formula else 0,
+                1 if settings_row.mineru_enable_table else 0,
+                1 if settings_row.mineru_is_ocr else 0,
+                settings_row.vision_model,
                 settings_row.theme,
                 1,
                 settings_row.vision_mode,
@@ -225,6 +269,7 @@ def register_user(username: str, password: str) -> User:
         user_id = int(cur.lastrowid)
 
     ensure_user_settings(user_id)
+    claim_bootstrap_provider(user_id)
     return get_user_by_id(user_id)
 
 
@@ -242,7 +287,10 @@ def authenticate_user(username: str, password: str) -> User:
             "UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?",
             (now, now, row["id"]),
         )
-    return get_user_by_id(int(row["id"]))
+    user_id = int(row["id"])
+    ensure_user_settings(user_id)
+    claim_bootstrap_provider(user_id)
+    return get_user_by_id(user_id)
 
 
 def get_user_by_id(user_id: int) -> User:
@@ -369,6 +417,17 @@ def update_user_settings(
     api_key: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
+    pdf_parser: str | None = None,
+    mineru_api_key: str | None = None,
+    mineru_base_url: str | None = None,
+    mineru_model_version: str | None = None,
+    mineru_language: str | None = None,
+    mineru_enable_formula: bool | None = None,
+    mineru_enable_table: bool | None = None,
+    mineru_is_ocr: bool | None = None,
+    vision_model: str | None = None,
+    clear_api_key: bool = False,
+    clear_mineru_api_key: bool = False,
     theme: str | None = None,
     vision_enabled: bool | None = None,
     vision_mode: str | None = None,
@@ -377,9 +436,26 @@ def update_user_settings(
     current = ensure_user_settings(user_id)
     next_settings = UserSettings(
         user_id=user_id,
-        api_key=current.api_key if api_key is None else api_key.strip(),
+        api_key="" if clear_api_key else (current.api_key if not api_key else api_key.strip()),
         base_url=current.base_url if base_url is None else base_url.strip(),
         model=current.model if model is None else model.strip(),
+        pdf_parser=current.pdf_parser if pdf_parser is None else pdf_parser.strip(),
+        mineru_api_key="" if clear_mineru_api_key else (
+            current.mineru_api_key if not mineru_api_key else mineru_api_key.strip()
+        ),
+        mineru_base_url=current.mineru_base_url if mineru_base_url is None else mineru_base_url.strip(),
+        mineru_model_version=(
+            current.mineru_model_version if mineru_model_version is None else mineru_model_version.strip()
+        ),
+        mineru_language=current.mineru_language if mineru_language is None else mineru_language.strip(),
+        mineru_enable_formula=(
+            current.mineru_enable_formula if mineru_enable_formula is None else bool(mineru_enable_formula)
+        ),
+        mineru_enable_table=(
+            current.mineru_enable_table if mineru_enable_table is None else bool(mineru_enable_table)
+        ),
+        mineru_is_ocr=current.mineru_is_ocr if mineru_is_ocr is None else bool(mineru_is_ocr),
+        vision_model=current.vision_model if vision_model is None else vision_model.strip(),
         theme=current.theme if theme is None else theme,
         vision_enabled=current.vision_enabled if vision_enabled is None else bool(vision_enabled),
         vision_mode=current.vision_mode if vision_mode is None else vision_mode,
@@ -396,13 +472,32 @@ def update_user_settings(
         next_settings.base_url = settings.openai_base_url
     if not next_settings.model:
         next_settings.model = settings.openai_model
+    if next_settings.pdf_parser not in {"local", "mineru"}:
+        next_settings.pdf_parser = "local"
+    if not next_settings.mineru_base_url:
+        next_settings.mineru_base_url = settings.mineru_base_url
+    if not next_settings.mineru_model_version:
+        next_settings.mineru_model_version = settings.mineru_model_version
+    if not next_settings.mineru_language:
+        next_settings.mineru_language = settings.mineru_language
+    if not next_settings.vision_model:
+        next_settings.vision_model = settings.vision_model
+    if not next_settings.base_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="LLM Base URL must start with http:// or https://")
+    if not next_settings.mineru_base_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="MinerU Base URL must start with http:// or https://")
+    if next_settings.pdf_parser == "mineru" and not next_settings.mineru_api_key:
+        raise HTTPException(status_code=400, detail="MinerU API Key is required for MinerU parsing")
 
     with db_cursor() as conn:
         conn.execute(
             """
             UPDATE user_settings
             SET llm_api_key_enc = ?, llm_base_url = ?, llm_model = ?, theme = ?,
-                vision_enabled = ?, vision_mode = ?, favorites_json = ?, updated_at = ?
+                vision_enabled = ?, vision_mode = ?, favorites_json = ?, updated_at = ?,
+                pdf_parser = ?, mineru_api_key_enc = ?, mineru_base_url = ?,
+                mineru_model_version = ?, mineru_language = ?, mineru_enable_formula = ?,
+                mineru_enable_table = ?, mineru_is_ocr = ?, vision_model = ?
             WHERE user_id = ?
             """,
             (
@@ -414,10 +509,106 @@ def update_user_settings(
                 next_settings.vision_mode,
                 json.dumps(next_settings.favorites),
                 next_settings.updated_at,
+                next_settings.pdf_parser,
+                encrypt_secret(next_settings.mineru_api_key),
+                next_settings.mineru_base_url,
+                next_settings.mineru_model_version,
+                next_settings.mineru_language,
+                1 if next_settings.mineru_enable_formula else 0,
+                1 if next_settings.mineru_enable_table else 0,
+                1 if next_settings.mineru_is_ocr else 0,
+                next_settings.vision_model,
                 user_id,
             ),
         )
     return ensure_user_settings(user_id)
+
+
+def claim_bootstrap_provider(user_id: int) -> None:
+    """Move first-run/legacy provider secrets into the first signed-in account."""
+    with _BOOTSTRAP_LOCK:
+        bootstrap = pending_bootstrap_provider()
+        if not bootstrap:
+            return
+        current = ensure_user_settings(user_id)
+        importing = not current.api_key
+        importing_mineru = not current.mineru_api_key
+        bootstrap_mineru_key = str(bootstrap.get("mineru_api_key", ""))
+        bootstrap_parser = str(bootstrap.get("pdf_parser", "local"))
+        if bootstrap_parser == "mineru" and not (current.mineru_api_key or bootstrap_mineru_key):
+            bootstrap_parser = "local"
+        update_user_settings(
+            user_id,
+            api_key=current.api_key or str(bootstrap.get("api_key", "")),
+            base_url=(str(bootstrap.get("base_url", "")) if importing else current.base_url),
+            model=(str(bootstrap.get("model", "")) if importing else current.model),
+            pdf_parser=(
+                bootstrap_parser if importing_mineru else current.pdf_parser
+            ),
+            mineru_api_key=current.mineru_api_key or bootstrap_mineru_key,
+            mineru_base_url=(
+                str(bootstrap.get("mineru_base_url", "")) if importing_mineru else current.mineru_base_url
+            ),
+            mineru_model_version=(
+                str(bootstrap.get("mineru_model_version", "")) if importing_mineru else current.mineru_model_version
+            ),
+            mineru_language=(
+                str(bootstrap.get("mineru_language", "")) if importing_mineru else current.mineru_language
+            ),
+            mineru_enable_formula=(
+                bool(bootstrap.get("mineru_enable_formula", True)) if importing_mineru else current.mineru_enable_formula
+            ),
+            mineru_enable_table=(
+                bool(bootstrap.get("mineru_enable_table", True)) if importing_mineru else current.mineru_enable_table
+            ),
+            mineru_is_ocr=(
+                bool(bootstrap.get("mineru_is_ocr", False)) if importing_mineru else current.mineru_is_ocr
+            ),
+            vision_model=(str(bootstrap.get("vision_model", "")) if importing else current.vision_model),
+        )
+        clear_bootstrap_secrets()
+
+
+def require_provider_settings(user_id: int) -> UserSettings:
+    provider = ensure_user_settings(user_id)
+    if not provider.api_key:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "config_required",
+                "message": "请先在个人中心配置大模型 API Key。",
+            },
+        )
+    if provider.pdf_parser == "mineru" and not provider.mineru_api_key:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "config_required",
+                "message": "当前选择了 MinerU，请先在个人中心配置 MinerU API Key。",
+            },
+        )
+    return provider
+
+
+def serialize_settings(user_settings: UserSettings) -> dict:
+    return {
+        "api_key_configured": bool(user_settings.api_key),
+        "base_url": user_settings.base_url,
+        "model": user_settings.model,
+        "pdf_parser": user_settings.pdf_parser,
+        "mineru_api_key_configured": bool(user_settings.mineru_api_key),
+        "mineru_base_url": user_settings.mineru_base_url,
+        "mineru_model_version": user_settings.mineru_model_version,
+        "mineru_language": user_settings.mineru_language,
+        "mineru_enable_formula": user_settings.mineru_enable_formula,
+        "mineru_enable_table": user_settings.mineru_enable_table,
+        "mineru_is_ocr": user_settings.mineru_is_ocr,
+        "vision_model": user_settings.vision_model,
+        "theme": user_settings.theme,
+        "vision_enabled": user_settings.vision_enabled,
+        "vision_mode": user_settings.vision_mode,
+        "favorites": user_settings.favorites,
+    }
 
 
 def serialize_me(user: User) -> dict:
@@ -429,13 +620,5 @@ def serialize_me(user: User) -> dict:
         "created_at": user.created_at,
         "updated_at": user.updated_at,
         "last_login_at": user.last_login_at,
-        "settings": {
-            "api_key": user_settings.api_key,
-            "base_url": user_settings.base_url,
-            "model": user_settings.model,
-            "theme": user_settings.theme,
-            "vision_enabled": user_settings.vision_enabled,
-            "vision_mode": user_settings.vision_mode,
-            "favorites": user_settings.favorites,
-        },
+        "settings": serialize_settings(user_settings),
     }

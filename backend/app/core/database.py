@@ -64,6 +64,15 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
                 llm_api_key_enc TEXT,
                 llm_base_url TEXT,
                 llm_model TEXT,
+                pdf_parser TEXT NOT NULL DEFAULT 'local',
+                mineru_api_key_enc TEXT,
+                mineru_base_url TEXT,
+                mineru_model_version TEXT,
+                mineru_language TEXT,
+                mineru_enable_formula INTEGER NOT NULL DEFAULT 1,
+                mineru_enable_table INTEGER NOT NULL DEFAULT 1,
+                mineru_is_ocr INTEGER NOT NULL DEFAULT 0,
+                vision_model TEXT,
                 theme TEXT NOT NULL DEFAULT 'light',
                 vision_enabled INTEGER NOT NULL DEFAULT 1,
                 vision_mode TEXT NOT NULL DEFAULT 'auto',
@@ -74,6 +83,23 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             )
             """
         )
+        existing_settings_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(user_settings)").fetchall()
+        }
+        settings_migrations = {
+            "pdf_parser": "TEXT NOT NULL DEFAULT 'local'",
+            "mineru_api_key_enc": "TEXT",
+            "mineru_base_url": "TEXT",
+            "mineru_model_version": "TEXT",
+            "mineru_language": "TEXT",
+            "mineru_enable_formula": "INTEGER NOT NULL DEFAULT 1",
+            "mineru_enable_table": "INTEGER NOT NULL DEFAULT 1",
+            "mineru_is_ocr": "INTEGER NOT NULL DEFAULT 0",
+            "vision_model": "TEXT",
+        }
+        for column, declaration in settings_migrations.items():
+            if column not in existing_settings_columns:
+                conn.execute(f"ALTER TABLE user_settings ADD COLUMN {column} {declaration}")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS documents (

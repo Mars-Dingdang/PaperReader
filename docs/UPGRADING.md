@@ -1,4 +1,14 @@
-# Upgrading to PaperReader v2.0
+# Upgrading PaperReader
+
+## Upgrading from v2.0 to v2.1
+
+PaperReader v2.1 moves desktop state to a per-user application directory and adds account-scoped MinerU/parser/vision settings. The first launch copies a legacy Windows portable `config.env` and `data` directory into `%LOCALAPPDATA%\PaperReader` without deleting the originals. After the first successful login, provider keys are encrypted in that account’s SQLite row and removed from the hidden `.config.env` bootstrap file.
+
+On macOS, state is stored under `~/Library/Application Support/PaperReader`. The first macOS release targets Apple Silicon and macOS 13 or newer. It is ad-hoc signed, not notarized.
+
+For source installations, keep the same `AUTH_SECRET_KEY` and `DATA_DIR`; the additive database migration runs automatically. `.env` remains available for deployment defaults, but personal-center settings take precedence for uploads, project builds, chat, MinerU, and visual checking.
+
+Release versions are `2.1.0`; the Git tag is `v2.1`.
 
 ## Version boundaries
 

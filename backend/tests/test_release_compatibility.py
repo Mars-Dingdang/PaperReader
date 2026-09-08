@@ -29,7 +29,9 @@ def test_accounts_documents_and_settings_survive_restart(isolated_storage):
         store.save_document(record)
         store.DOCUMENTS.clear()
         init_database()
-        assert first.get('/api/auth/me').json()['settings']['api_key'] == 'test-only-key'
+        settings_payload = first.get('/api/auth/me').json()['settings']
+        assert settings_payload['api_key_configured'] is True
+        assert 'api_key' not in settings_payload
         assert first.get('/api/auth/me').json()['settings']['theme'] == 'dark'
         assert first.get('/api/documents').json()[0]['document_id'] == 'existing-doc'
         assert other.get('/api/documents').json() == []
@@ -88,6 +90,7 @@ def test_legacy_chat_request_shape_still_works_after_login(isolated_storage, mon
     with TestClient(app) as client, TestClient(app) as other:
         user = register(client, 'chat-owner')
         register(other, 'chat-other')
+        client.put('/api/settings/me/providers', json={'api_key': 'chat-test-key'})
         source = settings.upload_dir / 'paper.tex'
         source.write_text('Example paper')
         store.save_document(store.DocumentRecord('chat-doc', user['id'], 'tex', source, extracted_text='Example paper'))
@@ -101,7 +104,7 @@ def test_legacy_chat_request_shape_still_works_after_login(isolated_storage, mon
 
 def test_desktop_health_version():
     with TestClient(app) as client:
-        assert client.get('/health').json() == {'status': 'ok', 'app': 'PaperReader', 'version': '2.0.0'}
+        assert client.get('/health').json() == {'status': 'ok', 'app': 'PaperReader', 'version': '2.1.0'}
 
 
 def test_v1_mineru_configuration_keeps_its_parser(monkeypatch):

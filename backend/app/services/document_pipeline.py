@@ -29,6 +29,7 @@ from app.services.mineru_layout import (
 )
 from app.services.alignment_service import save_exact_alignment
 from app.services.mineru_service import (
+    MinerUConfig,
     extract_structured_from_pdf,
     extract_structured_from_pdf_local,
     extract_text_from_pdf,  # noqa: F401  (kept for test monkeypatching compatibility)
@@ -41,6 +42,7 @@ from app.services.translate_service import (
     translate_text,
 )
 from app.services.vision_check_service import run_vision_check_on_markdown
+from app.services.auth_service import UserSettings
 
 _REFERENCE_SPLIT_PATTERN = re.compile(r"(?im)^\s*(references|bibliography)\s*$")
 _REFERENCE_ITEM_PATTERN = re.compile(r"^\s*(\[\d+\]|\d+\.|\d+\))\s+(.+)")
@@ -302,7 +304,29 @@ def process_document(
     override_api_key: str | None = None,
     override_base_url: str | None = None,
     override_model: str | None = None,
+    provider_settings: UserSettings | None = None,
 ) -> DocumentRecord:
+    if provider_settings is not None:
+        override_api_key = provider_settings.api_key
+        override_base_url = provider_settings.base_url
+        override_model = provider_settings.model
+    parser = provider_settings.pdf_parser if provider_settings else settings.pdf_parser
+    mineru_config = (
+        MinerUConfig(
+            api_key=provider_settings.mineru_api_key,
+            base_url=provider_settings.mineru_base_url,
+            model_version=provider_settings.mineru_model_version,
+            language=provider_settings.mineru_language,
+            enable_formula=provider_settings.mineru_enable_formula,
+            enable_table=provider_settings.mineru_enable_table,
+            is_ocr=provider_settings.mineru_is_ocr,
+            poll_interval=settings.mineru_poll_interval,
+            timeout=settings.mineru_timeout,
+        )
+        if provider_settings
+        else None
+    )
+    vision_model = provider_settings.vision_model if provider_settings else settings.vision_model
     record.status = "processing"
     record.logs.append("Processing started")
     init_stages(record, vision_check_enabled=record.vision_check_enabled)
@@ -360,6 +384,9 @@ def process_document(
                             pdf_path=output_dir / "original.pdf",
                             text=record.translated_text,
                             output_dir=output_dir,
+                            api_key=override_api_key,
+                            base_url=override_base_url,
+                            model=vision_model,
                         )
                     except Exception as exc:  # never block the pipeline on vision check
                         record.logs.append(f"Vision check skipped: {exc}")
@@ -394,7 +421,7 @@ def process_document(
                 _append_artifact(record, "original.pdf", "original_pdf", original_out)
                 _append_artifact(record, record.source_path.name, "source_pdf", record.source_path)
 
-                if settings.pdf_parser == "mineru":
+                if parser == "mineru":
                     extract_dir = output_dir / "mineru"
                     record.logs.append("Submitting PDF to MinerU")
                     try:
@@ -405,6 +432,7 @@ def process_document(
                             progress_cb=lambda frac, label: set_stage_progress(
                                 record, "parse", frac, label
                             ),
+                            config=mineru_config,
                         )
                     except Exception as mineru_exc:
                         # MinerU's result CDN can fail after cloud parsing has
@@ -475,6 +503,9 @@ def process_document(
                             pdf_path=output_dir / "original.pdf",
                             text=record.extracted_text,
                             output_dir=output_dir,
+                            api_key=override_api_key,
+                            base_url=override_base_url,
+                            model=vision_model,
                         )
                     except Exception as exc:
                         record.logs.append(f"Vision check skipped: {exc}")

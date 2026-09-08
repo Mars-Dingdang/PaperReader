@@ -1,2 +1,4 @@
 -r ../requirements.txt
 pyinstaller==6.11.1
+pywebview==6.2.1
+py2app==0.28.10; sys_platform == "darwin"

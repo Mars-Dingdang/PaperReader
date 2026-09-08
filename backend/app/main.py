@@ -14,6 +14,7 @@ from app.api.routes_project import router as project_router
 from app.api.routes_recompile import router as recompile_router
 from app.api.routes_review import router as review_router
 from app.api.routes_upload import router as upload_router
+from app.api.routes_setup import router as setup_router
 from app.core.config import settings
 from app.core.database import init_database
 
@@ -24,7 +25,7 @@ from app.core.database import init_database
 mimetypes.add_type("text/javascript", ".mjs")
 
 
-app = FastAPI(title="PaperReader", version="2.0.0")
+app = FastAPI(title="PaperReader", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,6 +38,7 @@ app.add_middleware(
 init_database()
 
 app.include_router(auth_router, prefix="/api", tags=["auth"])
+app.include_router(setup_router, prefix="/api", tags=["setup"])
 app.include_router(upload_router, prefix="/api", tags=["upload"])
 app.include_router(document_router, prefix="/api", tags=["document"])
 app.include_router(chat_router, prefix="/api", tags=["chat"])

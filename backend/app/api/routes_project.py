@@ -21,7 +21,7 @@ from app.models.store import (
     save_project,
     delete_project as delete_project_record,
 )
-from app.services.auth_service import User
+from app.services.auth_service import User, ensure_user_settings, require_provider_settings
 from app.services.document_pipeline import process_document
 
 
@@ -204,10 +204,10 @@ def delete_files(
     return _detail(project)
 
 
-def _run_pipeline(record_id: str) -> None:
+def _run_pipeline(record_id: str, user_id: int) -> None:
     record = get_document(record_id)
     if record:
-        process_document(record)
+        process_document(record, provider_settings=ensure_user_settings(user_id))
 
 
 @router.post("/project/{project_id}/build", response_model=UploadResponse)
@@ -217,6 +217,7 @@ def build_project(
     background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
 ) -> UploadResponse:
+    require_provider_settings(user.id)
     project = require_project_owner(project_id, user.id)
     main_rel = _safe_relative(req.main_tex)
     main_path = project.dir / main_rel
@@ -239,7 +240,7 @@ def build_project(
     record.vision_check_mode = req.vision_check_mode if req.vision_check_mode in ("auto", "manual") else "auto"
     save_document(record)
 
-    background_tasks.add_task(_run_pipeline, document_id)
+    background_tasks.add_task(_run_pipeline, document_id, user.id)
     return UploadResponse(document_id=document_id, status=record.status)
 
 
