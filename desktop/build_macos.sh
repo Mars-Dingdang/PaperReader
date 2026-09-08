@@ -29,7 +29,7 @@ mkdir -p "$PROJECT_ROOT/build"
 PY2APP_LOG="$PROJECT_ROOT/build/macos-py2app.log"
 if ! python desktop/setup_macos.py py2app >"$PY2APP_LOG" 2>&1; then
   tail -120 "$PY2APP_LOG"
-  PY2APP_ERROR="$(tail -40 "$PY2APP_LOG")"
+  PY2APP_ERROR="$(tail -8 "$PY2APP_LOG")"
   PY2APP_ERROR="${PY2APP_ERROR//'%'/'%25'}"
   PY2APP_ERROR="${PY2APP_ERROR//$'\r'/'%0D'}"
   PY2APP_ERROR="${PY2APP_ERROR//$'\n'/'%0A'}"
