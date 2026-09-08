@@ -150,7 +150,8 @@ def _declared_latex_compiler(tex_path: Path) -> str | None:
                 )
 
     try:
-        source_head = tex_path.read_text(encoding="utf-8", errors="replace")[:8192]
+        with tex_path.open("r", encoding="utf-8", errors="replace") as source:
+            source_head = source.read(8192)
     except OSError as exc:
         logger.warning("Could not inspect LaTeX compiler declaration in %s: %s", tex_path, exc)
         return None
