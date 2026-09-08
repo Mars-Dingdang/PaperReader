@@ -36,7 +36,7 @@ setup(
             "packages": ["webview", "uvicorn", "h11", "anyio", "charset_normalizer"],
             "includes": ["webview.platforms.cocoa"],
             "excludes": [
-                "pypdfium2", "pypdfium2_raw", "numpy", "scipy", "torch",
+                "pypdfium2", "pypdfium2_raw", "PyInstaller", "numpy", "scipy", "torch",
                 "torchaudio", "torchvision", "matplotlib", "pandas", "IPython",
                 "ipykernel", "jupyter", "sklearn", "sympy", "tkinter", "PyQt5",
                 "PyQt6", "PySide2", "PySide6", "gi", "gtk",
