@@ -101,3 +101,49 @@ def test_translate_latex_document_preserves_original_preamble(monkeypatch) -> No
     assert translated.count("\\begin{document}") == 1
     assert translated.count("\\end{document}") == 1
     assert "你好，世界。" in translated
+
+
+def test_translate_latex_document_shims_arxiv_unicode_declaration_for_xelatex(
+    monkeypatch,
+) -> None:
+    source_text = r"""\DeclareUnicodeCharacter{0301}{\'{e}}
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\begin{document}
+Hello world.
+\end{document}
+"""
+
+    monkeypatch.setattr(
+        translate_service, "_translate_latex_body", lambda *args, **kwargs: "你好。"
+    )
+
+    translated = translate_service.translate_latex_document(source_text)
+
+    compatibility = r"\providecommand{\DeclareUnicodeCharacter}[2]{}"
+    declaration = r"\DeclareUnicodeCharacter{0301}{\'{e}}"
+    assert translated.index(compatibility) < translated.index(declaration)
+    assert translated.count(compatibility) == 1
+    assert declaration in translated
+    assert "你好。" in translated
+
+    translated_again = translate_service._ensure_xelatex_compatibility(translated)
+    assert translated_again == translated
+
+
+def test_translate_latex_document_does_not_add_unused_unicode_compatibility(
+    monkeypatch,
+) -> None:
+    source_text = r"""\documentclass{article}
+\begin{document}
+Hello world.
+\end{document}
+"""
+
+    monkeypatch.setattr(
+        translate_service, "_translate_latex_body", lambda *args, **kwargs: "你好。"
+    )
+
+    translated = translate_service.translate_latex_document(source_text)
+
+    assert r"\providecommand{\DeclareUnicodeCharacter}[2]{}" not in translated
