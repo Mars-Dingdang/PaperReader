@@ -1,10 +1,10 @@
-# PaperReader v2.1.1
+# PaperReader v2.1.2
 
-[Download Windows / macOS v2.1.1](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.1) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.1.md)
+[Download Windows / macOS v2.1.2](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.2) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.2.md)
 
-v2.1.1 improves the desktop PDF reader, safely imports complete LaTeX source archives, and disables visual checking by default for new accounts and documents. Existing saved visual-check preferences are preserved. Frontend/API package version: `2.1.1`.
+v2.1.2 fixes LaTeX source compatibility by respecting supported compiler declarations from arXiv `00README.json` metadata or `% !TeX program = ...` comments. Projects without a supported declaration remain backward-compatible and continue to use XeLaTeX by default. Frontend/API package version: `2.1.2`.
 
-Windows users: extract the complete ZIP and run `PaperReader.exe`. Apple Silicon Mac users: open the DMG and copy PaperReader to Applications. Both builds show the provider setup wizard on first launch. TeX Live / XeLaTeX / latexmk is still required for translated PDF generation. See the [Windows guide](desktop/README_zh.md) and [macOS guide](desktop/README_macos_zh.md).
+Windows users: extract the complete ZIP and run `PaperReader.exe`. Apple Silicon Mac users: open the DMG and copy PaperReader to Applications. Both builds show the provider setup wizard on first launch. TeX Live / `latexmk` and the selected TeX engine are still required for translated PDF generation; projects without a declaration use XeLaTeX by default. See the [Windows guide](desktop/README_zh.md) and [macOS guide](desktop/README_macos_zh.md).
 
 ![](./images/demo1.png)
 

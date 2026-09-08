@@ -1,5 +1,13 @@
 # Upgrading PaperReader
 
+## Upgrading from v2.1.1 to v2.1.2
+
+PaperReader v2.1.2 is a backward-compatible patch release and requires no data migration. Keep the existing `DATA_DIR`, `SQLITE_DB_NAME`, `AUTH_SECRET_KEY`, account database, and user settings.
+
+The LaTeX compiler selector now respects supported project declarations instead of always forcing XeLaTeX. arXiv source archives may declare `00README.json` → `process.compiler`, and standalone TeX sources may use `% !TeX program = ...`. Supported values are `pdflatex`, `xelatex`, `lualatex`, and `latex`; unsupported or malformed declarations are ignored and fall back to the previous XeLaTeX default. TeX Live, `latexmk`, and whichever selected engine is needed by the source project must be installed on the host.
+
+Frontend, package-lock root metadata, API, release smoke checks, desktop documentation, and release notes are synchronized to `2.1.2`; the Git tag is `v2.1.2`. Existing v2.1.1 behavior is unchanged for projects without compiler declarations.
+
 ## Upgrading from v2.1 to v2.1.1
 
 PaperReader v2.1.1 is an additive update and requires no data migration. Keep the existing `DATA_DIR`, `SQLITE_DB_NAME`, and `AUTH_SECRET_KEY`. Existing accounts retain their saved visual-check choice; only newly created accounts and documents now default to visual checking off.
