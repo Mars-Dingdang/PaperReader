@@ -14,6 +14,7 @@ python -c 'from PIL import Image; import sys; Image.open(sys.argv[1]).convert("R
 
 cd "$PROJECT_ROOT"
 rm -rf "$PROJECT_ROOT/build/bdist.macosx-11.0-arm64" "$PROJECT_ROOT/dist/PaperReader.app"
+mkdir -p "$PROJECT_ROOT/build"
 PY2APP_LOG="$PROJECT_ROOT/build/macos-py2app.log"
 if ! python desktop/setup_macos.py py2app >"$PY2APP_LOG" 2>&1; then
   tail -120 "$PY2APP_LOG"
