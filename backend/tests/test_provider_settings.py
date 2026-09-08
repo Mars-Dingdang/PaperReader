@@ -85,6 +85,17 @@ def test_provider_settings_are_isolated_and_masked(isolated_storage):
         assert "api_key" not in second_me["settings"]
 
 
+def test_new_accounts_default_vision_check_off_and_preserve_explicit_choice(isolated_storage):
+    with TestClient(app) as client:
+        user = _register(client, "vision-default")
+        assert user["settings"]["vision_enabled"] is False
+
+        updated = client.put("/api/settings/me", json={"vision_enabled": True})
+        assert updated.status_code == 200
+        assert updated.json()["vision_enabled"] is True
+        assert client.get("/api/auth/me").json()["settings"]["vision_enabled"] is True
+
+
 def test_upload_requires_account_provider_configuration(isolated_storage):
     with TestClient(app) as client:
         _register(client, "missing-provider")

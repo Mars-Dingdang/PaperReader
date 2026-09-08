@@ -198,7 +198,7 @@ export function Sidebar({
       <input
         ref={fileInputRef}
         type="file"
-        accept=".pdf,.tex"
+        accept=".pdf,.tex,.zip,.tar,.tar.gz,.tgz"
         style={{ display: 'none' }}
         onChange={(e) => {
           const file = e.target.files?.[0]
@@ -207,6 +207,9 @@ export function Sidebar({
           e.currentTarget.value = ''
         }}
       />
+      <div className="sidebar-latex-recommendation">
+        有 LaTeX 源码时请优先上传，结构与翻译质量更好。
+      </div>
 
       <nav className="sidebar-nav">
         <button

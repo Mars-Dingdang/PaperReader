@@ -125,5 +125,5 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           VERSION=$(python -c "import json; print(json.load(open('frontend/package.json'))['version'])")
-          test "$RELEASE_TAG" = "v${VERSION%.*}"
+          test "$RELEASE_TAG" = "v$VERSION"
           gh release create "$RELEASE_TAG" release/* --verify-tag --title "PaperReader $RELEASE_TAG" --notes-file "docs/releases/$RELEASE_TAG.md" --latest

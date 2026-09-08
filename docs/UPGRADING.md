@@ -1,5 +1,15 @@
 # Upgrading PaperReader
 
+## Upgrading from v2.1 to v2.1.1
+
+PaperReader v2.1.1 is an additive update and requires no data migration. Keep the existing `DATA_DIR`, `SQLITE_DB_NAME`, and `AUTH_SECRET_KEY`. Existing accounts retain their saved visual-check choice; only newly created accounts and documents now default to visual checking off.
+
+The main upload entry and TeX project dialog now accept `.zip`, `.tar`, `.tar.gz`, and `.tgz` LaTeX projects. Archives are extracted locally with a 20 MB per-file limit, a 200 MB project limit, and a 2,000-member limit. Unsafe paths, links, special files, encrypted ZIP entries, collisions, damage, and packages without `.tex` files are rejected without partial import. Importing only stages files: select and confirm the proposed main `.tex` before building.
+
+The desktop reader now opens PDF HTTP(S) links in the system browser, restores PDF text selection/copy, increases trackpad pinch sensitivity, and generates a section outline when a PDF has text but no native bookmarks. Scanned PDFs without a text layer show an explicit empty outline state.
+
+Release, frontend, API, and desktop versions are `2.1.1`; the Git tag and release notes use the full SemVer tag `v2.1.1`.
+
 ## Upgrading from v2.0 to v2.1
 
 PaperReader v2.1 moves desktop state to a per-user application directory and adds account-scoped MinerU/parser/vision settings. The first launch copies a legacy Windows portable `config.env` and `data` directory into `%LOCALAPPDATA%\PaperReader` without deleting the originals. After the first successful login, provider keys are encrypted in that account’s SQLite row and removed from the hidden `.config.env` bootstrap file.

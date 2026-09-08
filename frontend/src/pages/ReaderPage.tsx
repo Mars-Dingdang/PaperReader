@@ -43,6 +43,7 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
   const [overrideLeft, setOverrideLeft] = useState<OverridePdf>(null)
   const [overrideRight, setOverrideRight] = useState<OverridePdf>(null)
   const [projectOpen, setProjectOpen] = useState(false)
+  const [projectArchive, setProjectArchive] = useState<File | null>(null)
   const [profileOpen, setProfileOpen] = useState(!user.settings.api_key_configured)
   const [editTexOpen, setEditTexOpen] = useState(false)
   const [theme, setTheme] = useState<UserSettings['theme']>(user.settings.theme)
@@ -199,6 +200,15 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
     }
   }, [refreshSummaries, visionEnabled, visionMode])
 
+  const handleIncomingFile = useCallback((file: File) => {
+    if (/\.(?:zip|tar|tar\.gz|tgz)$/i.test(file.name)) {
+      setProjectArchive(file)
+      setProjectOpen(true)
+      return
+    }
+    void handleUpload(file)
+  }, [handleUpload])
+
   const handleProjectBuilt = useCallback(async (documentId: string) => {
     setActiveId(documentId)
     await refreshSummaries()
@@ -307,7 +317,7 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
           visionEnabled={visionEnabled}
           visionMode={visionMode}
           activeStatus={activeDoc?.status}
-          onUpload={(f) => void handleUpload(f)}
+          onUpload={handleIncomingFile}
           onSelect={(id) => {
             setActiveId(id)
             setLiteratureChatOpen(false)
@@ -318,7 +328,10 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
           onCollapse={() => setShowSidebar(false)}
           onOpenInPane={handleOpenInPane}
           onEditTex={() => setEditTexOpen(true)}
-          onNewProject={() => setProjectOpen(true)}
+          onNewProject={() => {
+            setProjectArchive(null)
+            setProjectOpen(true)
+          }}
           onOpenProfile={() => setProfileOpen(true)}
           onLogout={() => void handleLogout()}
           onToggleChat={() => setShowChat((v) => !v)}
@@ -364,9 +377,10 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
             <div className="empty-illustration"><UploadCloud size={32} /></div>
             <span className="eyebrow">你的本地论文工作台</span>
             <h2>欢迎回来，{user.username}</h2>
-            <p className="muted">上传 PDF 或 TeX，PaperReader 会保留原文排版并生成可对照阅读的译文。</p>
-            <input ref={emptyUploadRef} type="file" accept=".pdf,.tex" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void handleUpload(file); event.currentTarget.value = '' }} />
-            <div className="empty-actions"><button className="btn primary" disabled={uploading} onClick={() => emptyUploadRef.current?.click()}>{uploading ? '正在上传…' : '选择论文'}</button><button className="btn" onClick={() => setProjectOpen(true)}>导入 TeX 项目</button></div>
+            <p className="muted">上传 PDF 或 LaTeX，PaperReader 会保留原文排版并生成可对照阅读的译文。</p>
+            <div className="latex-recommendation">arXiv 或论文提供 LaTeX 源码时，优先上传 LaTeX，可获得更好的结构与翻译质量。</div>
+            <input ref={emptyUploadRef} type="file" accept=".pdf,.tex,.zip,.tar,.tar.gz,.tgz" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) handleIncomingFile(file); event.currentTarget.value = '' }} />
+            <div className="empty-actions"><button className="btn primary" disabled={uploading} onClick={() => emptyUploadRef.current?.click()}>{uploading ? '正在上传…' : '选择论文'}</button><button className="btn" onClick={() => { setProjectArchive(null); setProjectOpen(true) }}>导入 TeX 项目</button></div>
             {!user.settings.api_key_configured && <button className="config-callout" onClick={() => setProfileOpen(true)}><AlertCircle size={16} />开始前需要配置 AI 服务</button>}
           </div>
         ) : (
@@ -432,10 +446,15 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
 
       <ProjectDrawer
         open={projectOpen}
-        onClose={() => setProjectOpen(false)}
+        onClose={() => {
+          setProjectOpen(false)
+          setProjectArchive(null)
+        }}
         onBuilt={(id) => void handleProjectBuilt(id)}
         visionCheckEnabled={visionEnabled}
         visionCheckMode={visionMode}
+        initialArchive={projectArchive}
+        onArchiveConsumed={() => setProjectArchive(null)}
       />
       <ProfileModal
         open={profileOpen}

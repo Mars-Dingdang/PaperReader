@@ -405,6 +405,15 @@ export async function uploadProjectFile(
   })
 }
 
+export async function uploadProjectArchive(projectId: string, file: File): Promise<ProjectDetail> {
+  const form = new FormData()
+  form.append('file', file)
+  return apiFetch(`/api/project/${projectId}/archive`, {
+    method: 'POST',
+    body: form
+  })
+}
+
 export async function deleteProjectFiles(projectId: string, relativePaths: string[]): Promise<ProjectDetail> {
   return apiFetch(`/api/project/${projectId}/delete-files`, {
     method: 'POST',

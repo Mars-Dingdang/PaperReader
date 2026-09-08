@@ -88,7 +88,7 @@ class DocumentRecord:
     stages: list[StageEntry] = field(default_factory=list)
     project_id: str | None = None
     main_tex: str | None = None
-    vision_check_enabled: bool = True
+    vision_check_enabled: bool = False
     vision_check_mode: str = "auto"
     pending_reviews: list[ReviewProposal] = field(default_factory=list)
     last_compile_warning: str | None = None

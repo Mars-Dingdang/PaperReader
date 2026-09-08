@@ -15,7 +15,7 @@ from pathlib import Path
 
 APP_NAME = "PaperReader"
 HOST = "127.0.0.1"
-PORT = 8000
+PORT = int(os.environ.get("PAPERREADER_PORT", "8000"))
 
 
 def _bundle_root() -> Path:
@@ -160,7 +160,7 @@ def main() -> None:
     backend_thread.start()
     if not _wait_until_ready(url):
         server.should_exit = True
-        raise RuntimeError("PaperReader backend did not become ready. Port 8000 may already be in use.")
+        raise RuntimeError(f"PaperReader backend did not become ready. Port {PORT} may already be in use.")
 
     import webview
 
@@ -173,6 +173,7 @@ def main() -> None:
         height=800,
         min_size=(1024, 700),
         confirm_close=False,
+        text_select=True,
     )
     try:
         webview.start(private_mode=False, storage_path=str(app_root / "webview"))

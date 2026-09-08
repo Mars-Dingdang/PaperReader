@@ -5,6 +5,7 @@ import {
   createProject,
   deleteProjectFiles,
   getProject,
+  uploadProjectArchive,
   uploadProjectFile,
   type ProjectDetail
 } from '../lib/api'
@@ -15,14 +16,29 @@ type Props = {
   onBuilt: (documentId: string) => void
   visionCheckEnabled: boolean
   visionCheckMode: 'auto' | 'manual'
+  initialArchive?: File | null
+  onArchiveConsumed?: () => void
 }
 
-export function ProjectDrawer({ open, onClose, onBuilt, visionCheckEnabled, visionCheckMode }: Props) {
+function isArchive(filename: string): boolean {
+  return /\.(?:zip|tar|tar\.gz|tgz)$/i.test(filename)
+}
+
+export function ProjectDrawer({
+  open,
+  onClose,
+  onBuilt,
+  visionCheckEnabled,
+  visionCheckMode,
+  initialArchive,
+  onArchiveConsumed,
+}: Props) {
   const [project, setProject] = useState<ProjectDetail | null>(null)
   const [busy, setBusy] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const [mainTex, setMainTex] = useState<string>('')
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const importedArchiveRef = useRef<File | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -46,6 +62,27 @@ export function ProjectDrawer({ open, onClose, onBuilt, visionCheckEnabled, visi
     else if (project?.main_candidates?.[0]) setMainTex(project.main_candidates[0])
   }, [project])
 
+  useEffect(() => {
+    if (!open || !project || !initialArchive || importedArchiveRef.current === initialArchive) return
+    importedArchiveRef.current = initialArchive
+    setBusy(true)
+    setError(null)
+    void uploadProjectArchive(project.project_id, initialArchive)
+      .then((detail) => {
+        setProject(detail)
+        onArchiveConsumed?.()
+      })
+      .catch((e: any) => setError(e?.message || String(e)))
+      .finally(() => setBusy(false))
+  }, [initialArchive, onArchiveConsumed, open, project])
+
+  function handleClose() {
+    if (busy) return
+    importedArchiveRef.current = null
+    onArchiveConsumed?.()
+    onClose()
+  }
+
   async function handleFiles(files: FileList | File[]) {
     if (!project) return
     setBusy(true)
@@ -53,9 +90,13 @@ export function ProjectDrawer({ open, onClose, onBuilt, visionCheckEnabled, visi
     try {
       let detail = project
       for (const f of Array.from(files)) {
-        // Use webkitRelativePath when available (folder upload), else file name.
-        const rel = (f as any).webkitRelativePath || f.name
-        detail = await uploadProjectFile(project.project_id, f, rel)
+        if (isArchive(f.name)) {
+          detail = await uploadProjectArchive(project.project_id, f)
+        } else {
+          // Use webkitRelativePath when available (folder upload), else file name.
+          const rel = (f as any).webkitRelativePath || f.name
+          detail = await uploadProjectFile(project.project_id, f, rel)
+        }
       }
       setProject(detail)
     } catch (e: any) {
@@ -88,6 +129,7 @@ export function ProjectDrawer({ open, onClose, onBuilt, visionCheckEnabled, visi
         visionCheckMode
       })
       onBuilt(result.document_id)
+      importedArchiveRef.current = null
       onClose()
       setProject(null)
     } catch (e: any) {
@@ -100,11 +142,11 @@ export function ProjectDrawer({ open, onClose, onBuilt, visionCheckEnabled, visi
   if (!open) return null
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div className="modal-overlay" onClick={handleClose}>
       <div className="modal-card" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <div className="modal-title">新建 TeX 项目</div>
-          <button className="icon-btn" title="关闭" onClick={onClose}>
+          <button className="icon-btn" title="关闭" onClick={handleClose} disabled={busy}>
             <X size={16} />
           </button>
         </div>
@@ -122,19 +164,23 @@ export function ProjectDrawer({ open, onClose, onBuilt, visionCheckEnabled, visi
             onClick={() => fileInputRef.current?.click()}
             role="button"
           >
-            拖拽 .tex / .bib / .cls / 图片到此，或点击选择文件
-            <div className="small" style={{ marginTop: 4 }}>支持多文件 · 单文件最大 20MB</div>
+            拖拽 LaTeX 文件或 .zip / .tar / .tar.gz / .tgz 工程包到此
+            <div className="small" style={{ marginTop: 4 }}>压缩包会在本地安全解压 · 单文件最大 20MB</div>
           </div>
           <input
             ref={fileInputRef}
             type="file"
             multiple
+            accept=".tex,.bib,.cls,.sty,.bst,.bbl,.png,.jpg,.jpeg,.pdf,.eps,.svg,.gif,.csv,.tsv,.txt,.md,.zip,.tar,.tar.gz,.tgz"
             style={{ display: 'none' }}
             onChange={(e) => {
               if (e.target.files?.length) void handleFiles(e.target.files)
               e.currentTarget.value = ''
             }}
           />
+          <div className="latex-recommendation">
+            arXiv 或论文提供 LaTeX 源码时，优先上传 LaTeX，可获得更好的结构与翻译质量。
+          </div>
           <div className="small muted" style={{ marginBottom: 4 }}>
             已上传文件 ({project?.files.length ?? 0})
           </div>
@@ -162,7 +208,7 @@ export function ProjectDrawer({ open, onClose, onBuilt, visionCheckEnabled, visi
           </div>
         </div>
         <div className="modal-footer">
-          <button className="btn" onClick={onClose} disabled={busy}>取消</button>
+          <button className="btn" onClick={handleClose} disabled={busy}>取消</button>
           <button
             className="btn primary"
             disabled={busy || !mainTex}

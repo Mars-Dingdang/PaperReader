@@ -99,7 +99,7 @@ def stages_for(source_type: str) -> list[tuple[str, str, float]]:
     return TEX_STAGES
 
 
-def init_stages(record: DocumentRecord, *, vision_check_enabled: bool = True) -> None:
+def init_stages(record: DocumentRecord, *, vision_check_enabled: bool = False) -> None:
     """Populate record.stages with declared stages (status=pending)."""
     plan = stages_for(record.source_type)
     if not vision_check_enabled:

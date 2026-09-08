@@ -23,6 +23,7 @@ from app.models.store import (
 )
 from app.services.auth_service import User, ensure_user_settings, require_provider_settings
 from app.services.document_pipeline import process_document
+from app.services.project_archive import ArchiveImportError, extract_project_archive
 
 
 router = APIRouter()
@@ -71,25 +72,41 @@ def _classify(p: Path) -> str:
     return "other"
 
 
+def _rank_main_candidates(project_dir: Path, files: list[ProjectFile]) -> list[str]:
+    preferred_names = {"main.tex": 0, "paper.tex": 1, "manuscript.tex": 2}
+    candidates: list[tuple[str, bool]] = []
+    for file in files:
+        if file.kind != "tex":
+            continue
+        path = project_dir / file.relative_path
+        try:
+            head = path.read_text(encoding="utf-8", errors="ignore")[:2000]
+        except OSError:
+            head = ""
+        candidates.append((file.relative_path, bool(_DOCCLASS_RE.search(head))))
+    candidates.sort(
+        key=lambda item: (
+            0 if item[1] else 1,
+            preferred_names.get(Path(item[0]).name.lower(), 3),
+            len(Path(item[0]).parts),
+            item[0].lower(),
+        )
+    )
+    return [path for path, _ in candidates]
+
+
 def _refresh_project(project: ProjectRecord) -> ProjectRecord:
     files: list[ProjectFile] = []
-    main_candidates: list[str] = []
     for path in project.dir.rglob("*"):
         if not path.is_file():
             continue
         rel = path.relative_to(project.dir).as_posix()
         size = path.stat().st_size
         files.append(ProjectFile(relative_path=rel, size=size, kind=_classify(path)))
-        if path.suffix.lower() == ".tex":
-            try:
-                head = path.read_text(encoding="utf-8", errors="ignore")[:2000]
-            except Exception:
-                head = ""
-            if _DOCCLASS_RE.search(head):
-                main_candidates.append(rel)
     files.sort(key=lambda f: f.relative_path)
+    main_candidates = _rank_main_candidates(project.dir, files)
     project.files = files
-    if project.main_tex not in {f.relative_path for f in files}:
+    if project.main_tex not in main_candidates:
         project.main_tex = main_candidates[0] if main_candidates else None
     return save_project(project)
 
@@ -119,7 +136,7 @@ class ProjectDetail(BaseModel):
 
 class BuildProjectRequest(BaseModel):
     main_tex: str
-    vision_check_enabled: bool = True
+    vision_check_enabled: bool = False
     vision_check_mode: str = "auto"
 
 
@@ -129,12 +146,13 @@ class DeleteFilesRequest(BaseModel):
 
 def _detail(project: ProjectRecord) -> ProjectDetail:
     refreshed = _refresh_project(project)
+    candidates = _rank_main_candidates(refreshed.dir, refreshed.files)
     return ProjectDetail(
         project_id=refreshed.project_id,
         name=refreshed.name,
         main_tex=refreshed.main_tex,
         files=[ProjectFileItem(**f.__dict__) for f in refreshed.files],
-        main_candidates=[f.relative_path for f in refreshed.files if f.kind == "tex"],
+        main_candidates=candidates,
     )
 
 
@@ -184,6 +202,29 @@ async def upload_project_file(
     target = project.dir / rel
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(content)
+    return _detail(project)
+
+
+@router.post("/project/{project_id}/archive", response_model=ProjectDetail)
+async def upload_project_archive(
+    project_id: str,
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+) -> ProjectDetail:
+    project = require_project_owner(project_id, user.id)
+    max_file_bytes = settings.project_max_file_mb * 1024 * 1024
+    max_total_bytes = settings.project_max_total_mb * 1024 * 1024
+    content = await file.read(max_total_bytes + 1)
+    try:
+        extract_project_archive(
+            content,
+            file.filename or "",
+            project.dir,
+            max_file_bytes=max_file_bytes,
+            max_total_bytes=max_total_bytes,
+        )
+    except ArchiveImportError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return _detail(project)
 
 

@@ -41,12 +41,15 @@ class Client:
 
 
 def main():
+    global BASE
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--archive', type=Path)
     mode.add_argument('--app', type=Path, help='Test a built macOS .app bundle')
     mode.add_argument('--web', action='store_true', help='Test the ordinary web server without desktop overrides')
+    parser.add_argument('--port', type=int, default=8000, help='Local port for the smoke-test server')
     args = parser.parse_args()
+    BASE = f'http://127.0.0.1:{args.port}'
     root = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix='PaperReader smoke ') as temp:
         base = Path(temp) / '中文 portable path'
@@ -60,13 +63,17 @@ def main():
         elif args.app:
             command = [str(args.app.resolve() / 'Contents' / 'MacOS' / 'PaperReader')]
         elif args.web:
-            command = [sys.executable, '-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000']
+            command = [
+                sys.executable, '-m', 'uvicorn', 'app.main:app',
+                '--host', '127.0.0.1', '--port', str(args.port),
+            ]
         else:
             command = [sys.executable, str(root / 'desktop' / 'launcher.py')]
         env = os.environ.copy()
         env.update(PAPERREADER_NO_WINDOW='1', DATA_DIR=str(base / '用户数据'),
                    PAPERREADER_ENV_FILE=str(base / 'config.env'), AUTH_SECRET_KEY='smoke-test-only',
-                   OPENAI_API_KEY='', MINERU_API_KEY='', PDF_PARSER='local')
+                   OPENAI_API_KEY='', MINERU_API_KEY='', PDF_PARSER='local',
+                   PAPERREADER_PORT=str(args.port))
         if args.web:
             env['PYTHONPATH'] = str(root / 'backend')
             env.pop('PAPERREADER_FRONTEND_DIR', None)
@@ -75,7 +82,7 @@ def main():
         def start():
             with socket.socket() as sock:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.bind(('127.0.0.1', 8000))
+                sock.bind(('127.0.0.1', args.port))
             process = subprocess.Popen(command, cwd=base, env=env)
             processes.append(process)
             deadline = time.monotonic() + 90
@@ -86,7 +93,7 @@ def main():
                                        else f'Launcher exited: {process.returncode}')
                 try:
                     health = Client().json('/health')
-                    assert health['app'] == 'PaperReader' and health['version'] == '2.1.0'
+                    assert health['app'] == 'PaperReader' and health['version'] == '2.1.1'
                     return process
                 except (urllib.error.URLError, ConnectionError):
                     time.sleep(0.25)

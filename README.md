@@ -1,8 +1,8 @@
-# PaperReader v2.1
+# PaperReader v2.1.1
 
-[Download Windows / macOS v2.1](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.md)
+[Download Windows / macOS v2.1.1](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.1) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.1.md)
 
-v2.1 adds secure in-app provider setup, per-account LLM/MinerU configuration, native Windows and Apple Silicon macOS windows, and a responsive UI refresh. Frontend/API package version: `2.1.0`.
+v2.1.1 improves the desktop PDF reader, safely imports complete LaTeX source archives, and disables visual checking by default for new accounts and documents. Existing saved visual-check preferences are preserved. Frontend/API package version: `2.1.1`.
 
 Windows users: extract the complete ZIP and run `PaperReader.exe`. Apple Silicon Mac users: open the DMG and copy PaperReader to Applications. Both builds show the provider setup wizard on first launch. TeX Live / XeLaTeX / latexmk is still required for translated PDF generation. See the [Windows guide](desktop/README_zh.md) and [macOS guide](desktop/README_macos_zh.md).
 
@@ -13,16 +13,18 @@ A full-stack application for bilingual paper reading:
 - User-scoped persistent history backed by local SQLite; processed files can be reopened after restart
 - First-run desktop wizard for LLM, MinerU, parser, and vision-model setup; secrets move into encrypted per-user storage after sign-in
 - Personal center for avatar/password changes and per-user LLM + MinerU settings; saved keys are never returned to the frontend
-- Upload `.pdf`, single `.tex`, or a multi-file TeX project (Phase B)
+- Upload `.pdf`, single `.tex`, individual TeX project files, or a complete `.zip` / `.tar` / `.tar.gz` / `.tgz` LaTeX project
+- Prefer LaTeX whenever arXiv or a publisher provides source code; it produces better structure and translation quality than PDF extraction
 - Parse PDF via the [MinerU](https://mineru.net/apiManage/docs) cloud API (精准解析, Bearer token)
 - Concurrent LLM translation (Phase 优化) with placeholder protection, jittered retry and `Retry-After` honoring
-- Vision-model adversarial check on each page (Qwen-class multimodal model, auto / manual review modes — Phase D)
+- Optional vision-model adversarial check on each page (Qwen-class multimodal model, auto / manual review modes — Phase D; off by default for new accounts)
 - Three-layer LaTeX-failure prevention:
   1. **Prose sanitizer** rewrites raw Greek / math unicode (`ε`, `≤`, `→`, `Σ`…) into proper inline math
   2. **Force-fallback compile**: strict pass first, then `latexmk -f` so a PDF is still produced; surfaces `last_compile_warning`
   3. **Manual editor**: pencil button on the `translated.tex` artifact opens an in-browser editor that saves and recompiles
 - Left/center/right reading workspace with toggleable Upload / Reader / Chat regions
 - Show original and translated PDF side-by-side
+- PDF bookmarks with generated section outlines when native bookmarks are missing, faster trackpad pinch zoom, selectable/copyable text, and external links that stay outside the desktop window
 - Progress bar with stage breakdown and ETA (Phase A)
 - Artifact panel with scrolling, hover thumbnail preview, and drag-into-PDF-pane (Phase C)
 - Chat with paper context via OpenAI-compatible API; full Markdown + GitHub-flavored tables + KaTeX math + soft line breaks for both user and assistant bubbles
@@ -142,7 +144,7 @@ cp .env.example .env
 - `TRANSLATE_BATCH_MAX_CHARS` (default `6000`) — max joined character length per IR batch request. Larger values amortize round-trip latency at the cost of larger per-call payloads.
 - `TRANSLATE_SEGMENT_MAX_CHARS` (default `2000`) — hard cap for any single prose segment. Long MinerU paragraphs are split and reassembled so a model output limit cannot cut off the latter half.
 - `VISION_MODEL` (default `GLM-4.5V`) — multimodal model used by the Phase D vision check. Must be a vision-capable model accessible via the same OpenAI-compatible endpoint as `OPENAI_BASE_URL` (e.g. `GLM-4.5V`, `GLM-4.6V`, `Qwen3-VL-30B-A3B-Instruct`, `Qwen3-VL-235B-A22B-Instruct`).
-- `VISION_CHECK_ENABLED` (default `true`), `VISION_CHECK_MODE` (`auto` | `manual`), `VISION_CHECK_MAX_PAGES` (default `8`) — toggle/limit Phase D check.
+- `VISION_CHECK_ENABLED` (default `false`), `VISION_CHECK_MODE` (`auto` | `manual`), `VISION_CHECK_MAX_PAGES` (default `8`) — deployment defaults for Phase D. New accounts start with checking off and can enable auto/manual checking in the sidebar or personal center.
 - `LATEXMK_PATH` — absolute path to `latexmk` if not on `PATH`.
 
 ### MinerU PDF parsing
@@ -299,6 +301,7 @@ Services:
   - `POST /api/project` — 创建 TeX 项目
   - `GET /api/project/{project_id}` — 查看文件与主文件候选
   - `POST /api/project/{project_id}/files` — 多次上传项目文件
+  - `POST /api/project/{project_id}/archive` — 安全导入 `.zip`、`.tar`、`.tar.gz` 或 `.tgz` LaTeX 工程包
   - `POST /api/project/{project_id}/delete-files`
   - `POST /api/project/{project_id}/build` — 选定主 `.tex` 后启动编译流水线
 - **Vision review (Phase D)**
@@ -319,6 +322,10 @@ Now includes:
 - `last_compile_warning` — set when the strict LaTeX pass failed but the lenient `-f` pass still produced a PDF; the UI surfaces this so users can open the manual TeX editor for cleanup
 - plus existing `status`, `original_pdf_url`, `translated_pdf_url`, `logs`
 
+### LaTeX archive safety
+
+Project archives are identified by both filename and content and extracted locally. Imports allow at most 2,000 members, 20 MB per file, and 200 MB for the complete project. Absolute paths, `..` traversal, links, device entries, encrypted ZIP members, duplicate/conflicting paths, corrupt archives, and archives without a `.tex` file are rejected atomically. After import, the UI shows the ranked main-file candidates and waits for the user to confirm one before parsing or translation starts.
+
 ### Chat payload
 
 ```json
@@ -337,6 +344,8 @@ Now includes:
 
 ### macOS (Apple Silicon)
 - PDF parsing now runs in the cloud via MinerU; no local Torch/MPS setup is required.
+- HTTP(S) links inside PDFs open in the system browser; the PaperReader window keeps the current paper and reading position.
+- PDF text selection/copy, generated outlines, and faster centered trackpad pinch zoom are enabled in the WKWebView reader.
 - If LaTeX compilation fails, install TeX Live + `latexmk` and Chinese fonts.
 
 ### Linux (CUDA)

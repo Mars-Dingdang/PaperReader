@@ -301,12 +301,12 @@ chmod +x desktop/build_macos.sh
 frontend/package.json -> version
 ```
 
-例如版本为 `2.1.0` 时，主要输出为：
+例如版本为 `2.1.1` 时，主要输出为：
 
 ```text
 dist/PaperReader.app
-release/PaperReader-v2.1.0-macOS-arm64.dmg
-release/PaperReader-v2.1.0-macOS-arm64.dmg.sha256
+release/PaperReader-v2.1.1-macOS-arm64.dmg
+release/PaperReader-v2.1.1-macOS-arm64.dmg.sha256
 ```
 
 直接打开构建出的 APP：
@@ -318,7 +318,7 @@ open dist/PaperReader.app
 打开 DMG：
 
 ```bash
-open release/PaperReader-v2.1.0-macOS-arm64.dmg
+open release/PaperReader-v2.1.1-macOS-arm64.dmg
 ```
 
 ---
@@ -420,66 +420,40 @@ v2.*
 5. 自动运行 `gh release create`；
 6. 将 Windows ZIP、macOS DMG 和 checksum 文件作为 Release assets 上传。
 
-当前 v2.1 Release 就是由该 GitHub Actions 流程自动发布的。
+正式 Release 由该 GitHub Actions 流程自动发布。
 
 ---
 
 # 11. 发布一个新的 Release
 
-## 11.1 当前版本号 / Tag 约定
+## 11.1 版本号 / Tag 约定
 
-当前 workflow 有一个非常重要的约束：
+workflow 要求 Git tag 与 `frontend/package.json` 的完整 SemVer 严格一致：
 
 ```bash
 VERSION=$(python -c "import json; print(json.load(open('frontend/package.json'))['version'])")
-test "$RELEASE_TAG" = "v${VERSION%.*}"
+test "$RELEASE_TAG" = "v$VERSION"
 ```
 
 也就是说：
 
 ```text
-frontend/package.json: 2.1.0
-Git tag:               v2.1
-Release notes:         docs/releases/v2.1.md
+frontend/package.json: 2.1.1
+Git tag:               v2.1.1
+Release notes:         docs/releases/v2.1.1.md
 ```
 
-而不是 `v2.1.0`。
-
-因此在 **当前 CI 配置不修改** 的情况下，建议每次正式发布提升 minor 版本，例如：
-
-```text
-2.1.0 -> tag v2.1
-2.2.0 -> tag v2.2
-2.3.0 -> tag v2.3
-```
-
-### 当前流程不支持正常的 patch tag
-
-例如把版本改成：
-
-```text
-2.1.1
-```
-
-workflow 仍会要求 tag：
-
-```text
-v2.1
-```
-
-但 `v2.1` 已经存在，因此无法自然发布一个新的 `v2.1.1` Release。
-
-如果以后需要标准 SemVer patch release，建议单独修改 `.github/workflows/release.yml`，让 tag 与完整 `version` 对齐，例如 `v2.1.1`。
+旧的 `v2.1` 短标签保持不动；所有新版本（包括 patch release）都使用完整三段版本号。
 
 ---
 
-## 11.2 示例：发布 v2.2
+## 11.2 示例：发布 v2.1.1
 
 假设准备发布：
 
 ```text
-应用版本：2.2.0
-Git tag：v2.2
+应用版本：2.1.1
+Git tag：v2.1.1
 ```
 
 ### Step 1：更新前端版本号
@@ -488,7 +462,7 @@ Git tag：v2.2
 
 ```bash
 cd frontend
-npm version 2.2.0 --no-git-tag-version
+npm version 2.1.1 --no-git-tag-version
 cd ..
 ```
 
@@ -501,7 +475,7 @@ node -p "require('./frontend/package.json').version"
 应该输出：
 
 ```text
-2.2.0
+2.1.1
 ```
 
 ### Step 2：创建 Release Notes
@@ -509,7 +483,7 @@ node -p "require('./frontend/package.json').version"
 创建：
 
 ```text
-docs/releases/v2.2.md
+docs/releases/v2.1.1.md
 ```
 
 文件名必须与 Git tag 一致，因为 workflow 会直接读取：
@@ -521,7 +495,7 @@ docs/releases/$RELEASE_TAG.md
 可以参考已有：
 
 ```text
-docs/releases/v2.1.md
+docs/releases/v2.1.1.md
 ```
 
 ### Step 3：本地验证
@@ -545,8 +519,8 @@ python scripts/smoke_release.py --app dist/PaperReader.app
 
 ```bash
 git status
-git add frontend/package.json frontend/package-lock.json docs/releases/v2.2.md
-git commit -m "prepare v2.2 release"
+git add frontend/package.json frontend/package-lock.json docs/releases/v2.1.1.md
+git commit -m "prepare v2.1.1 release"
 git push origin main
 ```
 
@@ -557,8 +531,8 @@ git push origin main
 ```bash
 git checkout main
 git pull --ff-only origin main
-git tag -a v2.2 -m "PaperReader v2.2"
-git push origin v2.2
+git tag -a v2.1.1 -m "PaperReader v2.1.1"
+git push origin v2.1.1
 ```
 
 **push tag 是正式 Release 的触发动作。**
@@ -596,13 +570,13 @@ gh run watch <RUN_ID>
 发布成功后：
 
 ```bash
-gh release view v2.2
+gh release view v2.1.1
 ```
 
 查看 Release assets：
 
 ```bash
-gh release view v2.2 --json assets
+gh release view v2.1.1 --json assets
 ```
 
 ---
@@ -614,11 +588,11 @@ gh release view v2.2 --json assets
 如果 CI 已经成功构建了全部 artifacts，但最后的 `publish` job 单独失败，可以下载/收集完整 Release 文件后手动执行类似：
 
 ```bash
-gh release create v2.2 \
+gh release create v2.1.1 \
   release/* \
   --verify-tag \
-  --title "PaperReader v2.2" \
-  --notes-file docs/releases/v2.2.md \
+  --title "PaperReader v2.1.1" \
+  --notes-file docs/releases/v2.1.1.md \
   --latest
 ```
 
@@ -774,26 +748,26 @@ conda activate paperreader-dev
 open dist/PaperReader.app
 ```
 
-## 发布下一 minor Release（以 v2.2 为例）
+## 发布下一个 SemVer Release（以 v2.1.2 为例）
 
 ```bash
 cd frontend
-npm version 2.2.0 --no-git-tag-version
+npm version 2.1.2 --no-git-tag-version
 cd ..
 
-# 编写 docs/releases/v2.2.md
+# 编写 docs/releases/v2.1.2.md
 
 python -m pytest backend/tests -q
 npm --prefix frontend run build
 ./desktop/build_macos.sh
 python scripts/smoke_release.py --app dist/PaperReader.app
 
-git add frontend/package.json frontend/package-lock.json docs/releases/v2.2.md
-git commit -m "prepare v2.2 release"
+git add frontend/package.json frontend/package-lock.json docs/releases/v2.1.2.md
+git commit -m "prepare v2.1.2 release"
 git push origin main
 
-git tag -a v2.2 -m "PaperReader v2.2"
-git push origin v2.2
+git tag -a v2.1.2 -m "PaperReader v2.1.2"
+git push origin v2.1.2
 ```
 
 之后由 GitHub Actions 自动生成 Windows x64 和 macOS arm64 构建并发布 GitHub Release。

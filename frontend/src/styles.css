@@ -577,6 +577,22 @@ textarea { resize: vertical; }
 }
 .empty-actions { display: flex; gap: 10px; margin-top: 22px; }
 .empty-actions .btn { padding: 9px 18px; }
+.latex-recommendation {
+  max-width: 560px;
+  margin-top: 12px;
+  padding: 8px 11px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.sidebar-latex-recommendation {
+  margin: 0 12px 10px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
 .config-callout { margin-top: 18px; display: inline-flex; align-items: center; gap: 7px; color: var(--warning); background: color-mix(in srgb, var(--warning) 9%, var(--bg-soft)); border: 1px solid color-mix(in srgb, var(--warning) 28%, var(--border)); padding: 8px 12px; }
 
 .app-notice {
@@ -712,6 +728,25 @@ textarea { resize: vertical; }
   border-right: 1px solid var(--border);
   padding: 8px 4px;
 }
+.pdf-outline-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 8px 8px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+.pdf-outline-heading span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 400;
+}
+.pdf-outline-empty {
+  padding: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
 .outline-list {
   list-style: none;
   margin: 0;
@@ -748,6 +783,11 @@ textarea { resize: vertical; }
 .pdf-canvas-wrap .react-pdf__Page {
   box-shadow: var(--shadow-md);
   background: var(--bg-soft);
+}
+.pdf-canvas-wrap .react-pdf__Page__textContent,
+.pdf-canvas-wrap .react-pdf__Page__textContent span {
+  -webkit-user-select: text !important;
+  user-select: text !important;
 }
 .pdf-scroll-stack {
   display: flex;
