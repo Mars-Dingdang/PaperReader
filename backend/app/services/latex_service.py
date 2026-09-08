@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 import shutil
@@ -27,6 +28,17 @@ _BOLD_PATTERN = re.compile(r"\*\*(.+?)\*\*")
 _ITALIC_PATTERN = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
 _NUMBERED_PATTERN = re.compile(r"^\s*\d+[\.)]\s+(.+)$", re.MULTILINE)
 _BULLET_PATTERN = re.compile(r"^\s*[-*]\s+(.+)$", re.MULTILINE)
+_TEX_PROGRAM_PATTERN = re.compile(
+    r"^\s*%\s*!\s*TEX\s+program\s*=\s*([^\s]+)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_DEFAULT_LATEX_COMPILER = "xelatex"
+_LATEXMK_ENGINE_FLAGS = {
+    "pdflatex": "-pdf",
+    "xelatex": "-xelatex",
+    "lualatex": "-lualatex",
+    "latex": "-pdfdvi",
+}
 
 
 def _markdown_to_latex_fallback(text: str) -> str:
@@ -98,10 +110,71 @@ class LatexCompileResult:
         self.warning = warning
 
 
+def _normalize_latex_compiler(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    compiler = value.strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if compiler.endswith(".exe"):
+        compiler = compiler[:-4]
+    if compiler in _LATEXMK_ENGINE_FLAGS:
+        return compiler
+    return None
+
+
+def _declared_latex_compiler(tex_path: Path) -> str | None:
+    """Return a supported compiler explicitly declared by the source project.
+
+    arXiv source archives may include ``00README.json`` with
+    ``process.compiler``. Standalone TeX files commonly use a
+    ``% !TeX program = ...`` magic comment. Metadata is treated as data only:
+    compiler names must match the allowlist above before they can affect the
+    latexmk command line.
+    """
+    metadata_path = tex_path.parent / "00README.json"
+    if metadata_path.is_file():
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            logger.warning("Could not read LaTeX compiler metadata %s: %s", metadata_path, exc)
+        else:
+            process = payload.get("process") if isinstance(payload, dict) else None
+            raw_compiler = process.get("compiler") if isinstance(process, dict) else None
+            compiler = _normalize_latex_compiler(raw_compiler)
+            if compiler:
+                return compiler
+            if raw_compiler:
+                logger.warning(
+                    "Ignoring unsupported LaTeX compiler declaration %r in %s",
+                    raw_compiler,
+                    metadata_path,
+                )
+
+    try:
+        source_head = tex_path.read_text(encoding="utf-8", errors="replace")[:8192]
+    except OSError as exc:
+        logger.warning("Could not inspect LaTeX compiler declaration in %s: %s", tex_path, exc)
+        return None
+
+    match = _TEX_PROGRAM_PATTERN.search(source_head)
+    if not match:
+        return None
+    compiler = _normalize_latex_compiler(match.group(1))
+    if compiler:
+        return compiler
+    logger.warning("Ignoring unsupported TeX program declaration %r in %s", match.group(1), tex_path)
+    return None
+
+
+def _latexmk_engine_flag(tex_path: Path) -> str:
+    compiler = _declared_latex_compiler(tex_path) or _DEFAULT_LATEX_COMPILER
+    return _LATEXMK_ENGINE_FLAGS[compiler]
+
+
 def _run_latexmk(tex_path: Path, output_dir: Path, *, force: bool) -> subprocess.CompletedProcess[str]:
+    engine_flag = _latexmk_engine_flag(tex_path)
     command = [
         settings.latexmk_path,
-        "-xelatex",
+        engine_flag,
         "-interaction=nonstopmode",
         "-output-directory=" + str(output_dir),
     ]
@@ -116,7 +189,7 @@ def _run_latexmk(tex_path: Path, output_dir: Path, *, force: bool) -> subprocess
         cwd=str(tex_path.parent),
         capture_output=True,
         text=True,
-        # latexmk/xelatex emit UTF-8 (e.g. Chinese from ctex, CJK filenames,
+        # TeX engines emit UTF-8 (e.g. Chinese from ctex, CJK filenames,
         # echoed source lines in warnings). The Windows default locale is GBK,
         # which crashes subprocess' reader thread with UnicodeDecodeError and
         # yields empty error output. Pin UTF-8 and tolerate stray bytes.
@@ -129,8 +202,9 @@ def compile_tex_project_with_fallback(tex_path: Path, output_dir: Path) -> Latex
     """Compile with strict mode first; if it fails, retry with `-f`.
 
     A lenient pass is accepted only when latexmk exits successfully and the
-    expected PDF exists. XeLaTeX can write an incomplete PDF before returning
-    an error, and treating that artifact as success truncates whole papers.
+    expected PDF exists. A TeX engine can write an incomplete PDF before
+    returning an error, and treating that artifact as success truncates whole
+    papers.
     """
     tex_path = tex_path.resolve()
     output_dir = output_dir.resolve()
@@ -151,7 +225,7 @@ def compile_tex_project_with_fallback(tex_path: Path, output_dir: Path) -> Latex
     log_path = output_dir / f"{tex_path.stem}.log"
     logger.warning("latexmk strict pass failed (rc=%s); retrying with -f", strict.returncode)
 
-    # A failed strict XeLaTeX pass may already have emitted a truncated PDF.
+    # A failed strict TeX pass may already have emitted a truncated PDF.
     # Remove it so only a fresh, successful lenient pass can satisfy the gate.
     expected_pdf.unlink(missing_ok=True)
     lenient = _run_latexmk(tex_path, output_dir, force=True)
