@@ -1,5 +1,7 @@
+import json
 import uuid
 from io import BytesIO
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from pypdf import PdfWriter
@@ -104,7 +106,17 @@ def test_legacy_chat_request_shape_still_works_after_login(isolated_storage, mon
 
 def test_desktop_health_version():
     with TestClient(app) as client:
-        assert client.get('/health').json() == {'status': 'ok', 'app': 'PaperReader', 'version': '2.1.1'}
+        assert client.get('/health').json() == {'status': 'ok', 'app': 'PaperReader', 'version': '2.1.2'}
+
+
+def test_release_version_metadata_stays_in_sync():
+    root = Path(__file__).resolve().parents[2]
+    package = json.loads((root / 'frontend' / 'package.json').read_text(encoding='utf-8'))
+    lock = json.loads((root / 'frontend' / 'package-lock.json').read_text(encoding='utf-8'))
+
+    assert package['version'] == app.version
+    assert lock['version'] == package['version']
+    assert lock['packages']['']['version'] == package['version']
 
 
 def test_v1_mineru_configuration_keeps_its_parser(monkeypatch):

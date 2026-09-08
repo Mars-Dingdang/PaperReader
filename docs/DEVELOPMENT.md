@@ -301,12 +301,12 @@ chmod +x desktop/build_macos.sh
 frontend/package.json -> version
 ```
 
-例如版本为 `2.1.1` 时，主要输出为：
+例如版本为 `2.1.2` 时，主要输出为：
 
 ```text
 dist/PaperReader.app
-release/PaperReader-v2.1.1-macOS-arm64.dmg
-release/PaperReader-v2.1.1-macOS-arm64.dmg.sha256
+release/PaperReader-v2.1.2-macOS-arm64.dmg
+release/PaperReader-v2.1.2-macOS-arm64.dmg.sha256
 ```
 
 直接打开构建出的 APP：
@@ -318,7 +318,7 @@ open dist/PaperReader.app
 打开 DMG：
 
 ```bash
-open release/PaperReader-v2.1.1-macOS-arm64.dmg
+open release/PaperReader-v2.1.2-macOS-arm64.dmg
 ```
 
 ---
@@ -438,22 +438,22 @@ test "$RELEASE_TAG" = "v$VERSION"
 也就是说：
 
 ```text
-frontend/package.json: 2.1.1
-Git tag:               v2.1.1
-Release notes:         docs/releases/v2.1.1.md
+frontend/package.json: 2.1.2
+Git tag:               v2.1.2
+Release notes:         docs/releases/v2.1.2.md
 ```
 
 旧的 `v2.1` 短标签保持不动；所有新版本（包括 patch release）都使用完整三段版本号。
 
 ---
 
-## 11.2 示例：发布 v2.1.1
+## 11.2 示例：发布 v2.1.2
 
 假设准备发布：
 
 ```text
-应用版本：2.1.1
-Git tag：v2.1.1
+应用版本：2.1.2
+Git tag：v2.1.2
 ```
 
 ### Step 1：更新前端版本号
@@ -462,7 +462,7 @@ Git tag：v2.1.1
 
 ```bash
 cd frontend
-npm version 2.1.1 --no-git-tag-version
+npm version 2.1.2 --no-git-tag-version
 cd ..
 ```
 
@@ -475,7 +475,7 @@ node -p "require('./frontend/package.json').version"
 应该输出：
 
 ```text
-2.1.1
+2.1.2
 ```
 
 ### Step 2：创建 Release Notes
@@ -483,7 +483,7 @@ node -p "require('./frontend/package.json').version"
 创建：
 
 ```text
-docs/releases/v2.1.1.md
+docs/releases/v2.1.2.md
 ```
 
 文件名必须与 Git tag 一致，因为 workflow 会直接读取：
@@ -495,7 +495,7 @@ docs/releases/$RELEASE_TAG.md
 可以参考已有：
 
 ```text
-docs/releases/v2.1.1.md
+docs/releases/v2.1.2.md
 ```
 
 ### Step 3：本地验证
@@ -519,8 +519,8 @@ python scripts/smoke_release.py --app dist/PaperReader.app
 
 ```bash
 git status
-git add frontend/package.json frontend/package-lock.json docs/releases/v2.1.1.md
-git commit -m "prepare v2.1.1 release"
+git add frontend/package.json frontend/package-lock.json docs/releases/v2.1.2.md
+git commit -m "prepare v2.1.2 release"
 git push origin main
 ```
 
@@ -531,8 +531,8 @@ git push origin main
 ```bash
 git checkout main
 git pull --ff-only origin main
-git tag -a v2.1.1 -m "PaperReader v2.1.1"
-git push origin v2.1.1
+git tag -a v2.1.2 -m "PaperReader v2.1.2"
+git push origin v2.1.2
 ```
 
 **push tag 是正式 Release 的触发动作。**
@@ -570,13 +570,13 @@ gh run watch <RUN_ID>
 发布成功后：
 
 ```bash
-gh release view v2.1.1
+gh release view v2.1.2
 ```
 
 查看 Release assets：
 
 ```bash
-gh release view v2.1.1 --json assets
+gh release view v2.1.2 --json assets
 ```
 
 ---
@@ -588,11 +588,11 @@ gh release view v2.1.1 --json assets
 如果 CI 已经成功构建了全部 artifacts，但最后的 `publish` job 单独失败，可以下载/收集完整 Release 文件后手动执行类似：
 
 ```bash
-gh release create v2.1.1 \
+gh release create v2.1.2 \
   release/* \
   --verify-tag \
-  --title "PaperReader v2.1.1" \
-  --notes-file docs/releases/v2.1.1.md \
+  --title "PaperReader v2.1.2" \
+  --notes-file docs/releases/v2.1.2.md \
   --latest
 ```
 
