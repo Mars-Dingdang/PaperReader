@@ -18,6 +18,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -27,6 +28,10 @@ from typing import Callable
 import requests
 
 from app.core.config import settings
+
+# Keep the curl download fallback windowless in the packaged desktop app
+# (see the matching flag in latex_service for the full rationale).
+_CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 @dataclass
@@ -508,6 +513,7 @@ def _download_and_extract_zip(
                 check=False,
                 capture_output=True,
                 text=True,
+                creationflags=_CREATION_FLAGS,
                 encoding="utf-8",
                 errors="replace",
             )

@@ -58,9 +58,11 @@ _DECLARE_UNICODE_CHARACTER_PATTERN = re.compile(r"\\DeclareUnicodeCharacter\s*\{
 _CJK_PREAMBLE_SNIPPET = (
     "\n% Injected by PaperReader to render Chinese translation\n"
     "\\usepackage{xeCJK}\n"
-    "\\IfFontExistsTF{Songti SC}{\\setCJKmainfont{Songti SC}}{%\n"
-    "  \\IfFontExistsTF{PingFang SC}{\\setCJKmainfont{PingFang SC}}{%\n"
-    "    \\IfFontExistsTF{Noto Serif CJK SC}{\\setCJKmainfont{Noto Serif CJK SC}}{}}}\n"
+    "\\IfFontExistsTF{SimSun}{\\setCJKmainfont[AutoFakeBold]{SimSun}}{%\n"
+    "  \\IfFontExistsTF{Songti SC}{\\setCJKmainfont{Songti SC}}{%\n"
+    "    \\IfFontExistsTF{PingFang SC}{\\setCJKmainfont{PingFang SC}}{%\n"
+    "      \\IfFontExistsTF{Noto Serif CJK SC}{\\setCJKmainfont{Noto Serif CJK SC}}{%\n"
+    "        \\IfFontExistsTF{FandolSong}{\\setCJKmainfont{FandolSong}}{}}}}}\n"
 )
 _XELATEX_UNICODE_COMPAT_SNIPPET = (
     "% Injected by PaperReader for pdfLaTeX source compatibility under XeLaTeX\n"

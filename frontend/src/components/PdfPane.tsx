@@ -3,6 +3,7 @@ import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+import { PDF_DOCUMENT_OPTIONS } from '../lib/pdfDocumentOptions'
 import {
   ChevronLeft,
   ChevronRight,
@@ -705,6 +706,7 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
         <div className="pdf-canvas-wrap" ref={scrollRef} onContextMenu={handleTextContextMenu}>
           <Document
             file={fileOpts ?? undefined}
+            options={PDF_DOCUMENT_OPTIONS}
             externalLinkTarget="_blank"
             externalLinkRel="noopener noreferrer"
             onLoadSuccess={onDocumentLoadSuccess}

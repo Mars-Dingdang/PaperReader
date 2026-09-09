@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -180,3 +182,24 @@ def test_error_detail_reports_strict_and_lenient_failures(tmp_path, monkeypatch)
 
     assert "real TeX error in strict pass" in str(excinfo.value)
     assert "lenient pass failure" in str(excinfo.value)
+
+
+def test_latexmk_child_processes_do_not_flash_a_console_window(tmp_path, monkeypatch):
+    tex = tmp_path / "paper.tex"
+    tex.write_text(r"\documentclass{article}" "\n", encoding="utf-8")
+    observed: dict[str, object] = {}
+
+    def fake_subprocess_run(command, **kwargs):
+        observed.update(kwargs)
+        return CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(latex_service.subprocess, "run", fake_subprocess_run)
+
+    latex_service._run_latexmk(tex, tmp_path, force=False)
+
+    # The packaged desktop app runs windowed; on Windows every console child
+    # (latexmk, xelatex, bibtex) would otherwise pop up its own terminal.
+    if sys.platform == "win32":
+        assert observed["creationflags"] == subprocess.CREATE_NO_WINDOW
+    else:
+        assert observed["creationflags"] == 0

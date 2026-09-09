@@ -3,6 +3,7 @@ import logging
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from app.core.config import settings
@@ -21,6 +22,13 @@ from app.services.mineru_layout import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The packaged desktop app runs windowed (no console). On Windows, spawning a
+# console-subsystem child (latexmk, xelatex, bibtex) from a console-less
+# process makes each child flash its own terminal window at the user. This
+# flag prevents the child from receiving a visible console window. POSIX has
+# no equivalent flag, so it degrades to the default 0 there.
+CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 _HEADING_PATTERN = re.compile(r"^(#{2,4})\s+(.+)$", re.MULTILINE)
@@ -201,6 +209,7 @@ def _run_latexmk(
         cwd=str(tex_path.parent),
         capture_output=True,
         text=True,
+        creationflags=CREATION_FLAGS,
         # TeX engines emit UTF-8 (e.g. Chinese from ctex, CJK filenames,
         # echoed source lines in warnings). The Windows default locale is GBK,
         # which crashes subprocess' reader thread with UnicodeDecodeError and

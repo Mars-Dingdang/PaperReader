@@ -147,3 +147,44 @@ Hello world.
     translated = translate_service.translate_latex_document(source_text)
 
     assert r"\providecommand{\DeclareUnicodeCharacter}[2]{}" not in translated
+
+
+def test_translate_latex_document_prefers_windows_cjk_font(monkeypatch) -> None:
+    source_text = r"""\documentclass{article}
+\begin{document}
+Hello world.
+\end{document}
+"""
+
+    monkeypatch.setattr(
+        translate_service, "_translate_latex_body", lambda *args, **kwargs: "你好。"
+    )
+
+    translated = translate_service.translate_latex_document(source_text)
+
+    snippet = translate_service._CJK_PREAMBLE_SNIPPET
+    assert r"\usepackage{xeCJK}" in snippet
+    # SimSun is a standard Windows CJK font and embeds as TrueType with a
+    # ToUnicode map, so translated PDFs render even in viewers without CMap
+    # support (the packaged pdf.js pane before its cMap configuration).
+    # It must be tried before the macOS/Linux/Fandol fallbacks.
+    assert snippet.index("SimSun") < snippet.index("Songti SC")
+    assert snippet.index("Songti SC") < snippet.index("PingFang SC")
+    assert snippet.index("PingFang SC") < snippet.index("Noto Serif CJK SC")
+    assert snippet.index("Noto Serif CJK SC") < snippet.index("FandolSong")
+    # The chain is injected right before \begin{document}, ahead of the body.
+    assert translated.index(snippet.strip().splitlines()[1]) < translated.index(
+        r"\begin{document}"
+    )
+
+
+def test_ensure_cjk_support_skips_documents_that_already_declare_cjk() -> None:
+    prefix = (
+        r"\documentclass{article}"
+        "\n"
+        r"\usepackage[UTF8]{ctex}"
+        "\n"
+        r"\begin{document}"
+    )
+
+    assert translate_service._ensure_cjk_support(prefix) == prefix

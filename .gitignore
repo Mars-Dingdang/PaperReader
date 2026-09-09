@@ -27,3 +27,8 @@ backend/data/
 0413problem.pdf
 testexamples/
 redbook.md
+
+*.zip
+PaperReader-v*.zip
+PaperReader-v*.tar.gz
+PaperReader-v*/

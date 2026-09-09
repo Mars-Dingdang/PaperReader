@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Document, Page } from 'react-pdf'
 import { makeDataUrl } from '../lib/api'
+import { PDF_DOCUMENT_OPTIONS } from '../lib/pdfDocumentOptions'
 
 type Props = {
   url: string
@@ -68,7 +69,7 @@ export function ArtifactPreviewTip({ url, kind, name, anchorRect }: Props) {
       <div className="artifact-tip-header small muted">{name}</div>
       <div className="artifact-tip-body">
         {type === 'pdf' && (
-          <Document file={{ url: fullUrl }} loading={<div className="muted small">加载中…</div>}
+          <Document file={{ url: fullUrl }} options={PDF_DOCUMENT_OPTIONS} loading={<div className="muted small">加载中…</div>}
             error={<div className="muted small">无法预览</div>}
           >
             <Page pageNumber={1} width={TIP_W - 16} renderTextLayer={false} renderAnnotationLayer={false} />
