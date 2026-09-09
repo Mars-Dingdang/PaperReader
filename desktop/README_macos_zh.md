@@ -1,15 +1,17 @@
-# PaperReader v2.1.2 macOS（Apple Silicon）
+# PaperReader v2.1.6 macOS（Apple Silicon）
 
 ## 安装与首次启动
 
-1. 下载 `PaperReader-v2.1.2-macOS-arm64.dmg` 及对应 `.sha256`，校验后打开 DMG。
+1. 下载 `PaperReader-v2.1.6-macOS-arm64.dmg` 及对应 `.sha256`，校验后打开 DMG。
 2. 将 PaperReader 拖入“应用程序”。本版本使用临时签名但未经过 Apple 公证；如果首次打开被拦截，请在 Finder 中按住 Control 点击应用并选择“打开”。
 3. 首次启动会在登录前显示配置向导。填写大模型 API Key、Base URL、模型，以及可选的 MinerU 参数。
 4. 注册或登录后，密钥会转存到当前本地账号的加密数据库。可随时在「个人中心 → AI 服务」修改。
 
 应用数据、隐藏配置和日志位于 `~/Library/Application Support/PaperReader`。不要分享该目录或包含私人论文的数据。
 
-## v2.1.2 LaTeX 兼容性与阅读功能
+## v2.1.6 LaTeX 兼容性与可恢复翻译
+
+翻译或 LaTeX 编译失败时，可在进度面板点击“从此处重试”。已完成的结构化解析与译块由 checkpoint 复用；自动 LaTeX 修复最多两轮，并仅允许修改编译器定位的行窗。
 
 - LaTeX 工程会优先遵循 arXiv `00README.json` → `process.compiler`，并支持 `% !TeX program = ...`。支持 pdflatex、xelatex、lualatex 和 latex；没有受支持声明时继续默认使用 XeLaTeX。
 

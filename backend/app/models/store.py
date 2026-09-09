@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,6 +63,24 @@ class ReviewProposal:
 
 
 @dataclass
+class FailureEntry:
+    stage: str
+    message: str
+    retryable: bool = True
+    chunk: int | None = None
+    retry_count: int = 0
+
+
+@dataclass
+class LatexRecoveryEntry:
+    status: str = "failed"
+    diagnosis: str | None = None
+    repairs: list[dict] = field(default_factory=list)
+    rounds: int = 0
+    last_error: str | None = None
+
+
+@dataclass
 class DocumentRecord:
     document_id: str
     owner_user_id: int
@@ -93,6 +112,9 @@ class DocumentRecord:
     pending_reviews: list[ReviewProposal] = field(default_factory=list)
     last_compile_warning: str | None = None
     translated_tex_path: Path | None = None
+    failure: FailureEntry | None = None
+    retry_count: int = 0
+    latex_recovery: LatexRecoveryEntry | None = None
     deleted_at: datetime | None = None
 
 
@@ -118,6 +140,7 @@ class ProjectRecord:
 
 DOCUMENTS: dict[str, DocumentRecord] = {}
 PROJECTS: dict[str, ProjectRecord] = {}
+_RETRY_LOCK = threading.RLock()
 
 
 def normalized_source_filename(name: str, original_name: str = "document.pdf") -> str:
@@ -150,6 +173,8 @@ def _serialize_items(items: list) -> str:
 
 
 def _document_from_row(row) -> DocumentRecord:
+    failure_payload = json.loads(row["failure_json"] or "null")
+    recovery_payload = json.loads(row["latex_recovery_json"] or "null")
     return DocumentRecord(
         document_id=row["document_id"],
         owner_user_id=int(row["owner_user_id"]),
@@ -181,6 +206,13 @@ def _document_from_row(row) -> DocumentRecord:
         pending_reviews=[ReviewProposal(**item) for item in json.loads(row["pending_reviews_json"] or "[]")],
         last_compile_warning=row["last_compile_warning"],
         translated_tex_path=Path(row["translated_tex_path"]) if row["translated_tex_path"] else None,
+        failure=FailureEntry(**failure_payload) if isinstance(failure_payload, dict) else None,
+        retry_count=int(row["retry_count"] or 0),
+        latex_recovery=(
+            LatexRecoveryEntry(**recovery_payload)
+            if isinstance(recovery_payload, dict)
+            else None
+        ),
         deleted_at=_from_iso(row["deleted_at"]) if row["deleted_at"] else None,
     )
 
@@ -276,6 +308,21 @@ def save_document(record: DocumentRecord) -> DocumentRecord:
                 record.last_compile_warning,
                 str(record.translated_tex_path) if record.translated_tex_path else None,
                 _to_iso(record.deleted_at),
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE documents
+            SET failure_json = ?, retry_count = ?, latex_recovery_json = ?
+            WHERE document_id = ?
+            """,
+            (
+                json.dumps(asdict(record.failure), ensure_ascii=False) if record.failure else None,
+                record.retry_count,
+                json.dumps(asdict(record.latex_recovery), ensure_ascii=False)
+                if record.latex_recovery
+                else None,
+                record.document_id,
             ),
         )
     return record
@@ -384,6 +431,32 @@ def require_document_owner(document_id: str, owner_user_id: int) -> DocumentReco
     if not record or record.owner_user_id != owner_user_id:
         raise HTTPException(status_code=404, detail="Document not found")
     return record
+
+
+def queue_document_retry(document_id: str, owner_user_id: int) -> tuple[DocumentRecord, str]:
+    """Atomically claim one failed document for retry within this app process."""
+    with _RETRY_LOCK:
+        record = require_document_owner(document_id, owner_user_id)
+        if record.status != "failed":
+            raise HTTPException(status_code=409, detail="Document is not in a retryable failed state")
+        if record.failure and not record.failure.retryable:
+            raise HTTPException(status_code=409, detail="This failure cannot be retried automatically")
+        failed_stage = (record.failure.stage if record.failure else record.current_stage) or "upload"
+        if failed_stage in {"latex_diagnose", "latex_repair", "latex_rebuild"}:
+            resume_from = (
+                "compile_translated"
+                if record.source_type in {"tex", "tex_project"}
+                else "latex_build"
+            )
+        else:
+            resume_from = failed_stage
+        record.retry_count += 1
+        if record.failure:
+            record.failure.retry_count = record.retry_count
+        record.status = "queued"
+        record.logs.append(f"Retry {record.retry_count} queued from stage: {resume_from}")
+        save_document(record)
+        return record, resume_from
 
 
 def require_project_owner(project_id: str, owner_user_id: int) -> ProjectRecord:

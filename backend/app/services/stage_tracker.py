@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Iterable
 
 from app.core.config import settings
-from app.models.store import DocumentRecord, StageEntry
+from app.models.store import DocumentRecord, StageEntry, save_document
 
 
 # stage_key -> (label, weight)
@@ -175,6 +175,44 @@ def set_stage_progress(
     if label:
         entry.label = label
         record.current_stage_label = label
+    save_document(record)
+
+
+def ensure_stage(record: DocumentRecord, key: str, label: str, weight: float = 1.0) -> StageEntry:
+    entry = next((stage for stage in record.stages if stage.key == key), None)
+    if entry is None:
+        entry = StageEntry(key=key, label=label, weight=weight)
+        record.stages.append(entry)
+        save_document(record)
+    return entry
+
+
+def prepare_stages_for_retry(record: DocumentRecord, resume_from: str) -> None:
+    """Keep completed prerequisites and reset the failed stage and successors."""
+    if resume_from.startswith("latex_"):
+        normalized = (
+            "compile_translated"
+            if record.source_type in {"tex", "tex_project"}
+            else "latex_build"
+        )
+    else:
+        normalized = resume_from
+    keys = [stage.key for stage in record.stages]
+    try:
+        start = keys.index(normalized)
+    except ValueError:
+        start = 0
+    for index, stage in enumerate(record.stages):
+        if index >= start:
+            stage.status = "pending"
+            stage.started_at = None
+            stage.ended_at = None
+            stage.duration_ms = None
+    record.current_stage = None
+    record.current_stage_label = None
+    record.stage_started_at = None
+    _recompute_eta(record)
+    save_document(record)
 
 
 @contextmanager
@@ -193,6 +231,7 @@ def with_stage(record: DocumentRecord, stage_key: str, label: str | None = None)
     record.current_stage_label = entry.label
     record.stage_started_at = started
     _recompute_eta(record)
+    save_document(record)
     try:
         yield entry
     except Exception:
@@ -200,6 +239,7 @@ def with_stage(record: DocumentRecord, stage_key: str, label: str | None = None)
         entry.ended_at = time.time()
         entry.duration_ms = int((entry.ended_at - started) * 1000)
         _recompute_eta(record)
+        save_document(record)
         raise
     else:
         ended = time.time()
@@ -208,6 +248,7 @@ def with_stage(record: DocumentRecord, stage_key: str, label: str | None = None)
         entry.duration_ms = int((ended - started) * 1000)
         _record_stage_duration(record.source_type, stage_key, ended - started)
         _recompute_eta(record)
+        save_document(record)
 
 
 def stage_dicts(record: DocumentRecord) -> list[dict]:

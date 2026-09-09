@@ -227,6 +227,31 @@ def test_escape_special_characters_in_text_only():
     assert "a & b \\\\ c & d" in tex
 
 
+def test_escaped_currency_dollars_do_not_turn_prose_into_inline_math():
+    """Regression: MinerU escaped currency markers must not span prose as math."""
+    pages = [[{
+        "type": "list",
+        "content": {
+            "list_type": "reference_list",
+            "list_items": [{
+                "item_type": "text",
+                "item_content": [{
+                    "type": "text",
+                    "content": r"Prices are \$10.99 in Big & Tall and \$3.99 to $x^2$.",
+                }],
+            }],
+        },
+    }]]
+
+    ir = blocks_to_ir(pages)
+    assert isinstance(ir[0], ListBlock)
+    assert [type(run) for run in ir[0].items[0]] == [TextRun, InlineMath, TextRun]
+    assert ir[0].items[0][1].latex == "x^2"
+
+    tex = render_ir_to_tex(ir)
+    assert r"Prices are \$10.99 in Big \& Tall and \$3.99 to $x^2$." in tex
+
+
 def test_create_translated_tex_from_ir_returns_iterable_repairs(tmp_path):
     # Regression: the function used to fall through without returning, so the
     # pipeline's `for note in repairs:` raised "'NoneType' object is not iterable".

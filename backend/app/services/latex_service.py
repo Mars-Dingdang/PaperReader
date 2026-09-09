@@ -407,10 +407,20 @@ _LATEX_TEXT_ESCAPES = (
 
 
 def _escape_latex_text(text: str) -> str:
-    out = text
-    for src, dst in _LATEX_TEXT_ESCAPES:
-        out = out.replace(src, dst)
-    return out
+    escape_map = dict(_LATEX_TEXT_ESCAPES)
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        # MinerU commonly emits currency as ``\$``. Preserve the already
+        # escaped pair instead of escaping its backslash a second time.
+        if text.startswith(r"\$", index):
+            out.append(r"\$")
+            index += 2
+            continue
+        ch = text[index]
+        out.append(escape_map.get(ch, ch))
+        index += 1
+    return "".join(out)
 
 
 def create_translated_tex(source_text: str, out_tex_path: Path, title: str | None = None) -> list[str]:

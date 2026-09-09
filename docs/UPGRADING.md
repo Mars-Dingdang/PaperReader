@@ -1,5 +1,13 @@
 # Upgrading PaperReader
 
+## Upgrading from v2.1.5 to v2.1.6
+
+PaperReader v2.1.6 is backward compatible. Keep the existing `DATA_DIR`, database, `AUTH_SECRET_KEY`, and provider settings. On first start, SQLite adds nullable failure/recovery JSON columns and a retry counter; no manual migration is required. Jobs left in `processing` or `recovering` by an application exit are marked as retryable failures rather than silently remaining stuck.
+
+PDF extraction and verified translation chunks now use atomic checkpoints under each document output directory. Failed translation can resume from the missing chunk, and failed LaTeX compilation reuses the already registered `translated.tex`. The failure panel exposes the stage, chunk, model diagnosis and exact repair history, with a guarded “retry from here” action. Automatic LaTeX repair is enabled by default, limited to two rounds, restricted to compiler-located line windows, and keeps a before-repair backup for every applied round.
+
+Frontend, package-lock root metadata, API, desktop guides, and release notes are synchronized to `2.1.6`; the Git tag is `v2.1.6`.
+
 ## Upgrading from v2.1.4 to v2.1.5
 
 PaperReader v2.1.5 is a backward-compatible patch release and requires no data migration. Keep the existing `DATA_DIR`, `SQLITE_DB_NAME`, `AUTH_SECRET_KEY`, account database, and user settings.

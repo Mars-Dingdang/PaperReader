@@ -38,7 +38,7 @@ _CHAR_TO_LATEX: dict[str, str] = {
     "⇒": r"\Rightarrow", "⇐": r"\Leftarrow", "⇔": r"\Leftrightarrow",
     "↦": r"\mapsto",
     "×": r"\times", "÷": r"\div", "±": r"\pm", "∓": r"\mp",
-    "⋅": r"\cdot", "∘": r"\circ", "∗": r"\ast",
+    "⋅": r"\cdot", "∘": r"\circ", "∗": r"\ast", "⋆": r"\star",
     "∈": r"\in", "∉": r"\notin", "⊂": r"\subset", "⊆": r"\subseteq",
     "⊃": r"\supset", "⊇": r"\supseteq", "∪": r"\cup", "∩": r"\cap",
     "∅": r"\emptyset", "∀": r"\forall", "∃": r"\exists",
@@ -72,8 +72,8 @@ _MATH_ENV_NAMES = (
 )
 _MATH_REGION_RE = re.compile(
     r"(?s)("
-    r"\$\$.+?\$\$"
-    r"|\$[^$\n]+?\$"
+    r"(?<!\\)\$\$.+?(?<!\\)\$\$"
+    r"|(?<!\\)\$[^$\n]+?(?<!\\)\$"
     r"|\\\[.+?\\\]"
     r"|\\\(.+?\\\)"
     r"|\\begin\{(?:" + "|".join(_MATH_ENV_NAMES) + r")\}.+?"
@@ -183,6 +183,10 @@ def _is_font_safe_char(ch: str) -> bool:
     code = ord(ch)
     if code < 0x80:
         return True
+    # Latin Modern/OpenType covers Latin-1, Latin Extended, IPA/modifier
+    # letters and combining marks used in author names and phonetic notation.
+    if 0x00A0 <= code <= 0x036F:
+        return True
     if ch in _CHAR_TO_LATEX:
         return True  # sanitize_latex_body converts it to a command
     if ch in _FONT_SAFE_EXTRAS:
@@ -222,6 +226,17 @@ _SQRT_FAULT_A_RE = re.compile(
 _SQRT_FAULT_B_RE = re.compile(
     r"\\sqrt[ \t]*\[[ \t]*(" + _BRACED + r")[ \t]*/[ \t]*(" + _BRACED + r")[ \t]*\}"
 )
+_GREEK_COMMANDS = (
+    "alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|"
+    "kappa|lambda|mu|nu|xi|pi|varpi|rho|varrho|sigma|varsigma|tau|upsilon|"
+    "phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega"
+)
+_MATHBF_GREEK_RE = re.compile(
+    r"\\mathbf\s*\{\s*(\\(?:" + _GREEK_COMMANDS + r"))\s*\}"
+)
+_ROMAN_ACCENT_RE = re.compile(
+    r"\\mathrm\s*\{\s*\\(bar|hat|tilde)\s*\{\s*([^{}]+?)\s*\}\s*\}"
+)
 
 
 def _line_of(text: str, offset: int) -> int:
@@ -233,7 +248,7 @@ def repair_common_math_faults(text: str) -> tuple[str, list[str]]:
     text plus one human-readable note per repair (with 1-based line numbers
     referring to the *input* text).
     """
-    if not text or "\\sqrt" not in text:
+    if not text:
         return text, []
     repairs: list[str] = []
 
@@ -259,11 +274,36 @@ def repair_common_math_faults(text: str) -> tuple[str, list[str]]:
     # faithful reading of the OCR output.
     repaired = _SQRT_FAULT_A_RE.sub(fix_variant_a, text)
     repaired = _SQRT_FAULT_B_RE.sub(fix_variant_b, repaired)
+
+    def fix_bold_greek(match: re.Match[str]) -> str:
+        line = _line_of(text, match.start())
+        repairs.append(f"L{line}: replaced \\mathbf around a Greek symbol with \\boldsymbol")
+        return f"\\boldsymbol{{{match.group(1)}}}"
+
+    def fix_roman_accent(match: re.Match[str]) -> str:
+        line = _line_of(text, match.start())
+        accent = {"bar": "overline", "hat": "widehat", "tilde": "widetilde"}[match.group(1)]
+        repairs.append(f"L{line}: moved math accent outside \\mathrm")
+        return f"\\{accent}{{\\mathrm{{{match.group(2).strip()}}}}}"
+
+    repaired = _MATHBF_GREEK_RE.sub(fix_bold_greek, repaired)
+    repaired = _ROMAN_ACCENT_RE.sub(fix_roman_accent, repaired)
     return repaired, repairs
 
 
 def _count_unescaped(text: str, char: str) -> int:
-    return len(re.findall(rf"(?<!\\){re.escape(char)}", text))
+    count = 0
+    for offset, current in enumerate(text):
+        if current != char:
+            continue
+        slashes = 0
+        cursor = offset - 1
+        while cursor >= 0 and text[cursor] == "\\":
+            slashes += 1
+            cursor -= 1
+        if slashes % 2 == 0:
+            count += 1
+    return count
 
 
 def validate_math_structure(text: str) -> list[tuple[int, str]]:
@@ -297,6 +337,92 @@ def validate_math_structure(text: str) -> list[tuple[int, str]]:
     return issues
 
 
+_ALIGNMENT_ENVIRONMENTS = {
+    "align", "align*", "aligned", "alignat", "alignat*", "array",
+    "tabular", "tabular*", "matrix", "pmatrix", "bmatrix", "vmatrix",
+    "Vmatrix", "smallmatrix", "cases", "eqnarray", "eqnarray*",
+}
+_ENV_TOKEN_RE = re.compile(r"\\(begin|end)\{([^{}]+)\}")
+
+
+def _is_escaped_at(text: str, offset: int) -> bool:
+    slashes = 0
+    offset -= 1
+    while offset >= 0 and text[offset] == "\\":
+        slashes += 1
+        offset -= 1
+    return slashes % 2 == 1
+
+
+def _without_comment(line: str) -> str:
+    for offset, ch in enumerate(line):
+        if ch == "%" and not _is_escaped_at(line, offset):
+            return line[:offset]
+    return line
+
+
+def validate_latex_structure(text: str) -> list[tuple[int, str]]:
+    """Conservative preflight for hazards outside the existing math lint.
+
+    The function reports only; it never rewrites source. Alignment tabs remain
+    legal inside table/matrix/alignment environments and escaped TeX specials
+    are ignored.
+    """
+    if not text:
+        return []
+    issues = list(validate_math_structure(text))
+    environment_stack: list[tuple[str, int]] = []
+    brace_stack: list[int] = []
+
+    for line_no, raw_line in enumerate(text.splitlines(), start=1):
+        line = _without_comment(raw_line)
+        events = {match.start(): match for match in _ENV_TOKEN_RE.finditer(line)}
+        cursor = 0
+        while cursor < len(line):
+            event = events.get(cursor)
+            if event is not None:
+                action, name = event.group(1), event.group(2)
+                if action == "begin":
+                    environment_stack.append((name, line_no))
+                elif not environment_stack:
+                    issues.append((line_no, f"environment '{name}' ends without a matching begin"))
+                elif environment_stack[-1][0] != name:
+                    expected = environment_stack[-1][0]
+                    issues.append((line_no, f"environment mismatch: expected end{{{expected}}}, got end{{{name}}}"))
+                    environment_stack.pop()
+                else:
+                    environment_stack.pop()
+                cursor = event.end()
+                continue
+
+            ch = line[cursor]
+            escaped = _is_escaped_at(line, cursor)
+            if ch == "{" and not escaped:
+                brace_stack.append(line_no)
+            elif ch == "}" and not escaped:
+                if brace_stack:
+                    brace_stack.pop()
+                else:
+                    issues.append((line_no, "unbalanced braces: unexpected '}'"))
+            elif ch == "&" and not escaped:
+                if not any(name in _ALIGNMENT_ENVIRONMENTS for name, _ in environment_stack):
+                    issues.append((line_no, "bare '&' outside an alignment/table environment"))
+            if ord(ch) < 32 and ch not in "\n\r\t":
+                issues.append((line_no, f"unsafe C0 control character U+{ord(ch):04X}"))
+            cursor += 1
+
+        for ch in raw_line:
+            if ord(ch) >= 32 and not _is_font_safe_char(ch):
+                issues.append((line_no, f"font-unsafe character {ch!r} (U+{ord(ch):04X})"))
+
+    if brace_stack:
+        issues.append((brace_stack[-1], f"unbalanced braces: {len(brace_stack)} opening brace(s) remain"))
+    for name, line_no in environment_stack:
+        issues.append((line_no, f"environment '{name}' is not closed"))
+
+    return sorted(set(issues), key=lambda issue: (issue[0], issue[1]))
+
+
 def sanitize_and_repair(text: str) -> tuple[str, list[str]]:
     """Combined pipeline hook: sanitize prose characters, then repair known
     OCR math faults. Returns the new text and repair notes (empty when
@@ -308,10 +434,19 @@ def sanitize_and_repair(text: str) -> tuple[str, list[str]]:
     stay a single literal character, so substituting it (e.g. to
     ``$\\square$``) breaks the compile with "Invalid argument".
     """
+    control_count = sum(1 for ch in text if ord(ch) < 32 and ch not in "\n\r\t")
+    if control_count:
+        text = "".join(ch for ch in text if ord(ch) >= 32 or ch in "\n\r\t")
+    control_repairs = (
+        [f"Removed {control_count} unsafe C0 control character(s)"]
+        if control_count
+        else []
+    )
     parts = _split_document(text)
     if parts is None:
         sanitized = sanitize_latex_body(text)
-        return repair_common_math_faults(sanitized)
+        repaired, repairs = repair_common_math_faults(sanitized)
+        return repaired, control_repairs + repairs
     head, body, tail = parts
     body, repairs = repair_common_math_faults(sanitize_latex_body(body))
-    return head + body + tail, repairs
+    return head + body + tail, control_repairs + repairs

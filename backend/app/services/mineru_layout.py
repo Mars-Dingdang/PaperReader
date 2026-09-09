@@ -146,13 +146,6 @@ def _runs_from_paragraph_content(items: Iterable) -> list[Run]:
     return runs
 
 
-# Matches $...$ (no nested $), \[...\] or \(...\) display/inline math.
-_INLINE_MATH_SPLIT = re.compile(
-    r"(\$[^$\n]+?\$"           # $...$
-    r"|\\\[[^\]]*?\\\]"        # \[...\]
-    r"|\\\([^\)]*?\\\))"       # \(…\)
-)
-
 
 def _split_text_at_math(text: str) -> list[Run]:
     """Split a raw text string at math-delimiter boundaries.
@@ -160,26 +153,65 @@ def _split_text_at_math(text: str) -> list[Run]:
     Returns a list of alternating TextRun / InlineMath nodes so that formula
     content is never sent to the translation layer as translatable prose.
     """
-    parts = _INLINE_MATH_SPLIT.split(text)
     runs: list[Run] = []
-    for i, part in enumerate(parts):
-        if not part:
-            continue
-        if i % 2 == 1:
-            # Odd indices are the captured math groups.
-            latex = part
-            # Strip outer delimiters to store bare LaTeX.
-            if latex.startswith("$") and latex.endswith("$"):
-                latex = latex[1:-1]
-            elif latex.startswith("\\[") and latex.endswith("\\]"):
-                latex = latex[2:-2]
-            elif latex.startswith("\\(") and latex.endswith("\\)"):
-                latex = latex[2:-2]
-            runs.append(InlineMath(latex=latex.strip()))
+    cursor = 0
+    prose_start = 0
+
+    def escaped(offset: int) -> bool:
+        slashes = 0
+        offset -= 1
+        while offset >= 0 and text[offset] == "\\":
+            slashes += 1
+            offset -= 1
+        return slashes % 2 == 1
+
+    while cursor < len(text):
+        opening = text[cursor]
+        closing = ""
+        content_start = cursor + 1
+        if opening == "$" and not escaped(cursor):
+            closing = "$"
+        elif text.startswith(r"\[", cursor):
+            closing = r"\]"
+            content_start = cursor + 2
+        elif text.startswith(r"\(", cursor):
+            closing = r"\)"
+            content_start = cursor + 2
         else:
-            if part.strip():
-                runs.append(TextRun(text=part))
+            cursor += 1
+            continue
+
+        if closing == "$":
+            end = content_start
+            while end < len(text):
+                if text[end] == "\n":
+                    end = -1
+                    break
+                if text[end] == "$" and not escaped(end):
+                    break
+                end += 1
+        else:
+            end = text.find(closing, content_start)
+        if end < 0 or end >= len(text):
+            cursor = content_start
+            continue
+
+        latex = text[content_start:end].strip()
+        if not latex:
+            cursor = end + len(closing)
+            continue
+        prose = text[prose_start:cursor]
+        if prose:
+            runs.append(TextRun(text=prose))
+        runs.append(InlineMath(latex=latex))
+        cursor = end + len(closing)
+        prose_start = cursor
+
+    tail = text[prose_start:]
+    if tail:
+        runs.append(TextRun(text=tail))
     return runs
+
 
 
 def _title_text(content: dict) -> str:

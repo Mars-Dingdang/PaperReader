@@ -1,3 +1,5 @@
+import hashlib
+import json
 import re
 import shutil
 import uuid
@@ -7,6 +9,8 @@ from app.core.config import settings
 from app.models.store import (
     ArtifactEntry,
     DocumentRecord,
+    FailureEntry,
+    LatexRecoveryEntry,
     ReferenceEntry,
     save_document,
     translated_pdf_filename,
@@ -29,15 +33,27 @@ from app.services.mineru_layout import (
     collect_translatable_strings,
 )
 from app.services.alignment_service import save_exact_alignment
-from app.services.latex_sanitizer import validate_math_structure
+from app.services.latex_recovery import recover_latex_document
+from app.services.latex_sanitizer import (
+    sanitize_and_repair,
+    validate_latex_structure,
+    validate_math_structure,
+)
 from app.services.mineru_service import (
     MinerUConfig,
+    MinerUResult,
     extract_structured_from_pdf,
     extract_structured_from_pdf_local,
     extract_text_from_pdf,  # noqa: F401  (kept for test monkeypatching compatibility)
     extract_text_from_pdf_text_layer,
 )
-from app.services.stage_tracker import init_stages, set_stage_progress, with_stage
+from app.services.stage_tracker import (
+    ensure_stage,
+    init_stages,
+    prepare_stages_for_retry,
+    set_stage_progress,
+    with_stage,
+)
 from app.services.translate_service import (
     translate_ir,
     translate_latex_document,
@@ -223,6 +239,11 @@ def _to_data_url(path: Path) -> str | None:
 
 
 def _append_artifact(record: DocumentRecord, name: str, kind: str, path: Path) -> None:
+    for artifact in record.artifacts:
+        if artifact.kind == kind and Path(artifact.path) == path:
+            artifact.name = name
+            artifact.url = _to_data_url(path)
+            return
     record.artifacts.append(
         ArtifactEntry(
             name=name,
@@ -288,6 +309,260 @@ def _extract_references_from_text(text: str) -> list[ReferenceEntry]:
     return refs
 
 
+_EXTRACTION_CHECKPOINT_VERSION = "pdf-extraction-v1"
+
+
+def _source_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _save_extraction_checkpoint(
+    path: Path, source_path: Path, result: MinerUResult
+) -> None:
+    payload = {
+        "version": _EXTRACTION_CHECKPOINT_VERSION,
+        "source_sha256": _source_digest(source_path),
+        "markdown": result.markdown,
+        "mode_label": result.mode_label,
+        "extracted_files": [str(item) for item in result.extracted_files],
+        "content_blocks": result.content_blocks,
+        "images_dir": str(result.images_dir) if result.images_dir else None,
+        "two_column": result.two_column,
+    }
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _load_extraction_checkpoint(path: Path, source_path: Path) -> MinerUResult | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("version") != _EXTRACTION_CHECKPOINT_VERSION:
+            return None
+        if payload.get("source_sha256") != _source_digest(source_path):
+            return None
+        return MinerUResult(
+            markdown=str(payload.get("markdown") or ""),
+            mode_label=str(payload.get("mode_label") or "checkpoint"),
+            extracted_files=[Path(item) for item in payload.get("extracted_files") or []],
+            content_blocks=payload.get("content_blocks"),
+            images_dir=Path(payload["images_dir"]) if payload.get("images_dir") else None,
+            two_column=bool(payload.get("two_column")),
+        )
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _persist_latex_recovery(record: DocumentRecord, report: LatexRecoveryEntry) -> None:
+    record.status = "recovering"
+    record.latex_recovery = report
+    stage_map = {
+        "analyzing": ("latex_diagnose", "分析 LaTeX 错误"),
+        "repairing": ("latex_repair", "安全修复 LaTeX"),
+        "recompiling": ("latex_rebuild", "重新编译 LaTeX"),
+    }
+    if report.status in stage_map:
+        key, label = stage_map[report.status]
+        entry = ensure_stage(record, key, label)
+        for stage in record.stages:
+            if stage.key.startswith("latex_") and stage.key != key and stage.status == "running":
+                stage.status = "done"
+        entry.status = "running"
+        record.current_stage = key
+        record.current_stage_label = label
+    elif report.status in {"succeeded", "failed"}:
+        for stage in record.stages:
+            if stage.key.startswith("latex_") and stage.status == "running":
+                stage.status = "done" if report.status == "succeeded" else "failed"
+    save_document(record)
+
+
+def _compile_translated_tex(
+    record: DocumentRecord,
+    translated_tex: Path,
+    output_dir: Path,
+    provider_settings: UserSettings | None,
+):
+    current_text = translated_tex.read_text(encoding="utf-8", errors="replace")
+    sanitized_text, deterministic_repairs = sanitize_and_repair(current_text)
+    if sanitized_text != current_text:
+        translated_tex.write_text(sanitized_text, encoding="utf-8")
+        for repair in deterministic_repairs:
+            record.logs.append(f"LaTeX preflight repair: {repair}")
+    record.translated_tex_path = translated_tex
+    _append_artifact(record, "translated.tex", "translated_tex", translated_tex)
+    save_document(record)
+    preflight = validate_latex_structure(translated_tex.read_text(encoding="utf-8", errors="replace"))
+    compile_result = None
+    initial_error: Exception | None = None
+    if not preflight:
+        try:
+            compile_result = compile_tex_project_with_fallback(
+                translated_tex, output_dir, compiler=TRANSLATED_LATEX_COMPILER
+            )
+        except Exception as exc:
+            initial_error = exc
+    else:
+        initial_error = RuntimeError(
+            "; ".join(f"L{line}: {message}" for line, message in preflight[:8])
+        )
+
+    if compile_result is None:
+        record.logs.append(f"LaTeX compile requires recovery: {initial_error}")
+        outcome = recover_latex_document(
+            translated_tex,
+            output_dir / f"{translated_tex.stem}.log",
+            provider_settings=provider_settings,
+            on_update=lambda report: _persist_latex_recovery(record, report),
+        )
+        record.latex_recovery = outcome.report
+        if outcome.result is None:
+            raise RuntimeError(
+                f"Automatic LaTeX recovery failed: {outcome.report.last_error or initial_error}"
+            )
+        compile_result = outcome.result
+        record.status = "processing"
+    return compile_result
+
+
+def _compile_translated_tex_project(
+    record: DocumentRecord,
+    translated_tex: Path,
+    output_dir: Path,
+    provider_settings: UserSettings | None,
+):
+    """Compile a translated TeX project while keeping its retry checkpoint durable."""
+    current_text = translated_tex.read_text(encoding="utf-8", errors="replace")
+    sanitized_text, deterministic_repairs = sanitize_and_repair(current_text)
+    if sanitized_text != current_text:
+        translated_tex.write_text(sanitized_text, encoding="utf-8")
+        for repair in deterministic_repairs:
+            record.logs.append(f"LaTeX preflight repair: {repair}")
+    record.translated_text = sanitized_text
+    record.translated_tex_path = translated_tex
+    _append_artifact(record, "translated.tex", "translated_tex", translated_tex)
+    save_document(record)
+
+    # Compile beside the source so relative includes and images keep resolving.
+    project_tex = record.source_path.parent / "__translated.tex"
+    project_tex.write_text(sanitized_text, encoding="utf-8")
+    preflight = validate_latex_structure(sanitized_text)
+    compile_result = None
+    initial_error: Exception | None = None
+    if not preflight:
+        try:
+            compile_result = compile_tex_project_with_fallback(
+                project_tex, output_dir, compiler=TRANSLATED_LATEX_COMPILER
+            )
+        except Exception as exc:
+            initial_error = exc
+    else:
+        initial_error = RuntimeError(
+            "; ".join(f"L{line}: {message}" for line, message in preflight[:8])
+        )
+
+    if compile_result is None:
+        record.logs.append(f"LaTeX compile requires recovery: {initial_error}")
+        outcome = recover_latex_document(
+            project_tex,
+            output_dir / f"{project_tex.stem}.log",
+            provider_settings=provider_settings,
+            compile_output_dir=output_dir,
+            backup_dir=output_dir,
+            on_update=lambda report: _persist_latex_recovery(record, report),
+        )
+        record.latex_recovery = outcome.report
+        repaired_text = project_tex.read_text(encoding="utf-8", errors="replace")
+        translated_tex.write_text(repaired_text, encoding="utf-8")
+        record.translated_text = repaired_text
+        save_document(record)
+        if outcome.result is None:
+            raise RuntimeError(
+                f"Automatic LaTeX recovery failed: {outcome.report.last_error or initial_error}"
+            )
+        compile_result = outcome.result
+        record.status = "processing"
+    return compile_result
+
+
+def _resume_pdf_translation(
+    record: DocumentRecord,
+    mineru_result: MinerUResult,
+    output_dir: Path,
+    *,
+    override_api_key: str | None,
+    override_base_url: str | None,
+    override_model: str | None,
+    provider_settings: UserSettings | None,
+) -> None:
+    display_title, _ = _derive_display_title(record.source_filename, record.extracted_text)
+    translated_tex = output_dir / "translated.tex"
+    with with_stage(record, "translate"):
+        ir_blocks = (
+            blocks_to_ir(mineru_result.content_blocks)
+            if mineru_result.content_blocks is not None
+            else None
+        )
+        if ir_blocks:
+            source_segments = collect_translatable_strings(ir_blocks)
+            translate_ir(
+                ir_blocks,
+                override_api_key=override_api_key,
+                override_base_url=override_base_url,
+                override_model=override_model,
+                checkpoint_path=output_dir / "translation-checkpoint.json",
+                progress_callback=lambda done, total: set_stage_progress(
+                    record,
+                    "translate",
+                    done / max(1, total),
+                    f"翻译 {done}/{total} 个片段",
+                ),
+            )
+            translated_segments = collect_translatable_strings(ir_blocks)
+            alignment_path = save_exact_alignment(record, source_segments, translated_segments)
+            if alignment_path:
+                _append_artifact(record, alignment_path.name, "alignment_index", alignment_path)
+            record.translated_text = _ir_to_translated_markdown(ir_blocks)
+            create_translated_tex_from_ir(
+                ir_blocks,
+                translated_tex,
+                images_src_dir=mineru_result.images_dir,
+                title=display_title,
+                two_column=mineru_result.two_column,
+            )
+        else:
+            translated = translate_text(
+                record.extracted_text,
+                override_api_key=override_api_key,
+                override_base_url=override_base_url,
+                override_model=override_model,
+                checkpoint_path=output_dir / "translation-checkpoint.json",
+                progress_callback=lambda done, total: set_stage_progress(
+                    record, "translate", done / max(1, total), f"翻译 {done}/{total} 个片段"
+                ),
+            )
+            record.translated_text = translated
+            create_translated_tex(translated, translated_tex, title=display_title)
+        record.translated_tex_path = translated_tex
+        _append_artifact(record, "translated.tex", "translated_tex", translated_tex)
+        save_document(record)
+
+    with with_stage(record, "latex_build"):
+        compile_result = _compile_translated_tex(
+            record, translated_tex, output_dir, provider_settings
+        )
+        if compile_result.warning:
+            record.last_compile_warning = compile_result.warning
+            record.logs.append(f"LaTeX warning: {compile_result.warning}")
+        _publish_translated_pdf(record, compile_result.pdf_path, output_dir)
+
+
 def create_document_record(source_path: Path, source_type: str, owner_user_id: int = 0) -> DocumentRecord:
     document_id = str(uuid.uuid4())
     source_filename = source_path.name.split("_", 1)[-1] if "_" in source_path.name else source_path.name
@@ -307,6 +582,7 @@ def process_document(
     override_base_url: str | None = None,
     override_model: str | None = None,
     provider_settings: UserSettings | None = None,
+    resume_from: str | None = None,
 ) -> DocumentRecord:
     if provider_settings is not None:
         override_api_key = provider_settings.api_key
@@ -330,8 +606,15 @@ def process_document(
     )
     vision_model = provider_settings.vision_model if provider_settings else settings.vision_model
     record.status = "processing"
-    record.logs.append("Processing started")
-    init_stages(record, vision_check_enabled=record.vision_check_enabled)
+    record.logs.append(
+        f"Retry processing started from {resume_from}" if resume_from else "Processing started"
+    )
+    if not record.stages:
+        init_stages(record, vision_check_enabled=record.vision_check_enabled)
+    elif resume_from:
+        prepare_stages_for_retry(record, resume_from)
+    else:
+        init_stages(record, vision_check_enabled=record.vision_check_enabled)
     save_document(record)
     try:
         record.size_bytes = record.source_path.stat().st_size
@@ -343,8 +626,67 @@ def process_document(
     record.logs.append(f"Output dir: {output_dir}")
 
     try:
-        with with_stage(record, "upload"):
-            pass
+        if not resume_from:
+            with with_stage(record, "upload"):
+                pass
+
+        if record.source_type in {"tex", "tex_project"} and resume_from in {
+            "compile_translated", "latex_build", "latex_diagnose", "latex_repair", "latex_rebuild"
+        }:
+            translated_tex = record.translated_tex_path or (output_dir / "translated.tex")
+            if translated_tex.is_file():
+                with with_stage(record, "compile_translated"):
+                    compile_result = _compile_translated_tex_project(
+                        record, translated_tex, output_dir, provider_settings
+                    )
+                    if compile_result.warning:
+                        record.last_compile_warning = compile_result.warning
+                    _publish_translated_pdf(record, compile_result.pdf_path, output_dir)
+                record.status = "done"
+                record.failure = None
+                record.logs.append("Processing done")
+                return save_document(record)
+            record.logs.append("Translated TeX checkpoint missing; falling back to translation")
+            resume_from = "translate"
+
+        if record.source_type == "pdf" and resume_from in {
+            "latex_build", "latex_diagnose", "latex_repair", "latex_rebuild"
+        }:
+            translated_tex = record.translated_tex_path or (output_dir / "translated.tex")
+            if translated_tex.is_file():
+                with with_stage(record, "latex_build"):
+                    compile_result = _compile_translated_tex(
+                        record, translated_tex, output_dir, provider_settings
+                    )
+                    if compile_result.warning:
+                        record.last_compile_warning = compile_result.warning
+                    _publish_translated_pdf(record, compile_result.pdf_path, output_dir)
+                record.status = "done"
+                record.failure = None
+                record.logs.append("Processing done")
+                return save_document(record)
+            record.logs.append("Translated TeX checkpoint missing; falling back to translation")
+            resume_from = "translate"
+
+        if record.source_type == "pdf" and resume_from == "translate":
+            mineru_checkpoint = _load_extraction_checkpoint(
+                output_dir / "extraction-checkpoint.json", record.source_path
+            )
+            if mineru_checkpoint is not None and record.extracted_text:
+                _resume_pdf_translation(
+                    record,
+                    mineru_checkpoint,
+                    output_dir,
+                    override_api_key=override_api_key,
+                    override_base_url=override_base_url,
+                    override_model=override_model,
+                    provider_settings=provider_settings,
+                )
+                record.status = "done"
+                record.failure = None
+                record.logs.append("Processing done")
+                return save_document(record)
+            record.logs.append("Extraction checkpoint missing or invalid; falling back to parse")
 
         if record.source_type in ("tex", "tex_project"):
             with with_stage(record, "compile_original"):
@@ -394,28 +736,26 @@ def process_document(
                         record.logs.append(f"Vision check skipped: {exc}")
 
             with with_stage(record, "compile_translated"):
-                # Write translated tex next to the source so \\includegraphics resolves
-                translated_tex_in_project = record.source_path.parent / "__translated.tex"
-                translated_tex_in_project.write_text(record.translated_text, encoding="utf-8")
-                compile_result = compile_tex_project_with_fallback(
-                    translated_tex_in_project, output_dir, compiler=TRANSLATED_LATEX_COMPILER
-                )
-                translated_pdf = compile_result.pdf_path
-                if compile_result.warning:
-                    record.last_compile_warning = compile_result.warning
-                    record.logs.append(f"LaTeX warning: {compile_result.warning}")
-
                 translated_tex = output_dir / "translated.tex"
                 translated_tex.write_text(record.translated_text, encoding="utf-8")
                 record.translated_tex_path = translated_tex
                 _append_artifact(record, "translated.tex", "translated_tex", translated_tex)
                 record.logs.append(f"Translated TEX: {translated_tex}")
+                save_document(record)
+
                 structure_issues = validate_math_structure(record.translated_text)
                 if structure_issues:
                     digest = "; ".join(f"L{line}: {msg}" for line, msg in structure_issues[:5])
                     record.logs.append(
                         f"LaTeX structure check found {len(structure_issues)} issue(s): {digest}"
                     )
+                compile_result = _compile_translated_tex_project(
+                    record, translated_tex, output_dir, provider_settings
+                )
+                translated_pdf = compile_result.pdf_path
+                if compile_result.warning:
+                    record.last_compile_warning = compile_result.warning
+                    record.logs.append(f"LaTeX warning: {compile_result.warning}")
 
                 _publish_translated_pdf(record, translated_pdf, output_dir)
 
@@ -466,6 +806,10 @@ def process_document(
                     mineru_result = extract_structured_from_pdf_local(
                         str(record.source_path), extract_dir, log_sink=record.logs
                     )
+
+            _save_extraction_checkpoint(
+                output_dir / "extraction-checkpoint.json", record.source_path, mineru_result
+            )
 
             with with_stage(record, "clean"):
                 extracted_text = mineru_result.markdown
@@ -541,6 +885,13 @@ def process_document(
                         override_api_key=override_api_key,
                         override_base_url=override_base_url,
                         override_model=override_model,
+                        checkpoint_path=output_dir / "translation-checkpoint.json",
+                        progress_callback=lambda done, total: set_stage_progress(
+                            record,
+                            "translate",
+                            done / max(1, total),
+                            f"翻译 {done}/{total} 个片段",
+                        ),
                     )
                     translated_alignment_segments = collect_translatable_strings(ir_blocks)
                     alignment_path = save_exact_alignment(
@@ -571,6 +922,13 @@ def process_document(
                         override_api_key=override_api_key,
                         override_base_url=override_base_url,
                         override_model=override_model,
+                        checkpoint_path=output_dir / "translation-checkpoint.json",
+                        progress_callback=lambda done, total: set_stage_progress(
+                            record,
+                            "translate",
+                            done / max(1, total),
+                            f"翻译 {done}/{total} 个片段",
+                        ),
                     )
                     record.translated_text = translated
                     repairs = create_translated_tex(translated, translated_tex, title=display_title)
@@ -578,6 +936,7 @@ def process_document(
                         record.logs.append(f"Repaired OCR math fault at {note}")
 
                 _append_artifact(record, "translated.tex", "translated_tex", translated_tex)
+                record.translated_tex_path = translated_tex
                 record.logs.append(f"Translated TEX: {translated_tex}")
                 tex_content = translated_tex.read_text(encoding="utf-8", errors="ignore")
                 structure_issues = validate_math_structure(tex_content)
@@ -588,8 +947,8 @@ def process_document(
                     )
 
             with with_stage(record, "latex_build"):
-                compile_result = compile_tex_project_with_fallback(
-                    translated_tex, output_dir, compiler=TRANSLATED_LATEX_COMPILER
+                compile_result = _compile_translated_tex(
+                    record, translated_tex, output_dir, provider_settings
                 )
                 translated_pdf = compile_result.pdf_path
                 if compile_result.warning:
@@ -599,8 +958,18 @@ def process_document(
                 _publish_translated_pdf(record, translated_pdf, output_dir)
 
         record.status = "done"
+        record.failure = None
         record.logs.append("Processing done")
     except Exception as exc:
         record.status = "failed"
+        failure_stage = record.current_stage or resume_from or "upload"
+        chunk_match = re.search(r"chunk\s+(\d+)", str(exc), re.IGNORECASE)
+        record.failure = FailureEntry(
+            stage=failure_stage,
+            message=str(exc),
+            retryable=record.source_path.is_file(),
+            chunk=int(chunk_match.group(1)) if chunk_match else None,
+            retry_count=record.retry_count,
+        )
         record.logs.append(f"Error: {exc}")
     return save_document(record)

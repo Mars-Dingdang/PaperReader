@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from app.services import translate_service
@@ -131,3 +133,83 @@ def test_translate_ir_never_silently_publishes_failed_english_chunks(monkeypatch
 
     with pytest.raises(RuntimeError, match="Translation incomplete"):
         translate_service.translate_ir(ir)
+
+
+def test_translate_ir_preserves_structural_think_tag_without_sending_it(monkeypatch):
+    def unexpected_chat(*args, **kwargs):
+        raise AssertionError("a pure structural tag must bypass the model")
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", unexpected_chat)
+    ir = [Title(level=2, text="<think>")]
+    translate_service.translate_ir(ir)
+    assert ir[0].text == "<think>"
+
+
+def test_translate_ir_retries_only_invalid_batch_member(monkeypatch):
+    calls: list[str] = []
+
+    def fake_chat(message, system_prompt, **kwargs):
+        calls.append(message)
+        if "@@SEG@@" in message:
+            return "第一段@@SEG@@I am supposed to translate the text inside these tags, but cannot."
+        assert "Second" in message
+        return "第二段"
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", fake_chat)
+    ir = [Paragraph(runs=[TextRun(text="First"), TextRun(text="Second")])]
+    translate_service.translate_ir(ir)
+
+    assert ir[0].runs[0].text == "第一段"
+    assert ir[0].runs[1].text == "第二段"
+    assert len(calls) == 2
+
+
+def test_translate_ir_reuses_verified_checkpoint_across_provider_changes(tmp_path, monkeypatch):
+    calls: list[str] = []
+
+    def fake_chat(message, system_prompt, **kwargs):
+        calls.append(message)
+        return "已验证译文"
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", fake_chat)
+    checkpoint = tmp_path / "translation-checkpoint.json"
+    first = [Paragraph(runs=[TextRun(text="Stable source")])]
+    translate_service.translate_ir(first, checkpoint_path=checkpoint, override_model="model-a")
+    assert first[0].runs[0].text == "已验证译文"
+
+    def provider_must_not_run(*args, **kwargs):
+        raise AssertionError("verified chunks must survive provider setting changes")
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", provider_must_not_run)
+    second = [Paragraph(runs=[TextRun(text="Stable source")])]
+    translate_service.translate_ir(second, checkpoint_path=checkpoint, override_model="model-b")
+    assert second[0].runs[0].text == "已验证译文"
+    assert len(calls) == 1
+
+
+def test_translate_text_rejects_invalid_cached_chunk(tmp_path, monkeypatch):
+    source = "Translate this paragraph."
+    checkpoint = tmp_path / "translation-checkpoint.json"
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "version": translate_service._TRANSLATION_CONTRACT_VERSION,
+                "segments": {
+                    translate_service._checkpoint_key(source, "text"): "```latex\nunsafe\n```"
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    def fake_chat(message, system_prompt, **kwargs):
+        calls.append(message)
+        return "安全译文"
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", fake_chat)
+
+    translated = translate_service.translate_text(source, checkpoint_path=checkpoint)
+
+    assert translated == "安全译文"
+    assert calls == [source]
