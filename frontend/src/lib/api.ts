@@ -124,11 +124,30 @@ export type ProjectDetail = {
   main_candidates: string[]
 }
 
+export type LintIssue = {
+  line: number | null
+  message: string
+}
+
+export type MissingChar = {
+  char: string
+  codepoint: string
+  count: number
+  suggest: string | null
+}
+
 export type RecompileResult = {
   ok: boolean
   pdf_url?: string | null
   warning?: string | null
   error?: string | null
+  issues?: LintIssue[]
+  missing_chars?: MissingChar[]
+}
+
+export type DocumentTex = {
+  tex_content: string
+  path: string
 }
 
 export type ChatMessage = {
@@ -450,9 +469,12 @@ export async function postReviewDecision(
   })
 }
 
-export async function getDocumentTex(documentId: string): Promise<string> {
+export async function getDocumentTex(documentId: string): Promise<DocumentTex> {
   const data = await apiFetch(`/api/document/${documentId}/tex`)
-  return (data.tex_content as string) || ''
+  return {
+    tex_content: (data.tex_content as string) || '',
+    path: (data.path as string) || ''
+  }
 }
 
 export async function recompileDocument(
@@ -463,5 +485,16 @@ export async function recompileDocument(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ tex_content: texContent })
+  })
+}
+
+export async function revealDocumentTex(
+  documentId: string,
+  target: 'folder' | 'editor'
+): Promise<{ ok: boolean; error?: string | null }> {
+  return apiFetch(`/api/document/${documentId}/tex/reveal`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target })
   })
 }

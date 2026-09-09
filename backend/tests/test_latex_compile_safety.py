@@ -203,3 +203,107 @@ def test_latexmk_child_processes_do_not_flash_a_console_window(tmp_path, monkeyp
         assert observed["creationflags"] == subprocess.CREATE_NO_WINDOW
     else:
         assert observed["creationflags"] == 0
+
+
+# --------------------------------------------------------------------------
+# TeX log diagnostics
+# --------------------------------------------------------------------------
+
+_SAMPLE_LOG = """This is XeTeX, Version 3.141592653
+[17]
+Missing character: There is no □ (U+25A1) in font [lmroman12-regular]:mapping=tex-text;!
+[18]
+! Argument of \\@sqrt has an extra }.
+<inserted text>
+                \\par
+l.740 ...fty } { \\sqrt [ { k } / { a _ { n } } ] }
+                                                  = { \\sqrt [ { k } / { A }...
+! Missing $ inserted.
+<inserted text>
+                $
+l.740 ...fty } { \\sqrt [ { k } / { a _ { n } } ] }
+Missing character: There is no □ (U+25A1) in font [lmroman12-regular]:mapping=tex-text;!
+"""
+
+
+def test_parse_latex_log_issues_extracts_errors_and_missing_chars(tmp_path):
+    log = tmp_path / "paper.log"
+    log.write_text(_SAMPLE_LOG, encoding="utf-8")
+
+    errors, missing = latex_service.parse_latex_log_issues(log)
+
+    assert errors, "fatal ! lines must be extracted"
+    assert errors[0]["message"].startswith("Argument of \\@sqrt")
+    assert errors[0]["line"] == 740
+    assert {e["line"] for e in errors} == {740}
+
+    assert len(missing) == 1
+    assert missing[0]["char"] == "□"
+    assert missing[0]["codepoint"] == "U+25A1"
+    assert missing[0]["count"] == 2
+    assert missing[0]["suggest"] == "\\square"
+
+
+def test_compile_failure_report_prefers_structured_log_digest(tmp_path, monkeypatch):
+    tex = tmp_path / "paper.tex"
+    tex.write_text("broken", encoding="utf-8")
+
+    def fake_run(tex_path: Path, output_dir: Path, *, force: bool, compiler=None):
+        (output_dir / "paper.log").write_text(_SAMPLE_LOG, encoding="utf-8")
+        return CompletedProcess([], 12, stdout="Missing character noise everywhere", stderr="")
+
+    monkeypatch.setattr(latex_service, "_run_latexmk", fake_run)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        latex_service.compile_tex_project_with_fallback(tex, tmp_path)
+
+    message = str(excinfo.value)
+    assert "L740" in message
+    assert "Argument of \\@sqrt" in message
+    assert "U+25A1" in message
+
+
+def test_compile_success_with_missing_glyphs_sets_warning(tmp_path, monkeypatch):
+    tex = tmp_path / "paper.tex"
+    tex.write_text("\\documentclass{article}", encoding="utf-8")
+    log = tmp_path / "paper.log"
+    log.write_text(_SAMPLE_LOG, encoding="utf-8")
+
+    def fake_run(tex_path: Path, output_dir: Path, *, force: bool, compiler=None):
+        (output_dir / "paper.pdf").write_bytes(b"%PDF-1.4")
+        return CompletedProcess([], 0, stdout="", stderr="")
+
+    monkeypatch.setattr(latex_service, "_run_latexmk", fake_run)
+
+    result = latex_service.compile_tex_project_with_fallback(tex, tmp_path)
+
+    assert result.warning is not None
+    assert "U+25A1" in result.warning
+    assert result.missing_chars[0]["suggest"] == "\\square"
+
+
+def test_translated_templates_carry_unicode_fallback_preamble(tmp_path):
+    from app.services.latex_sanitizer import repair_common_math_faults
+
+    tex_path = tmp_path / "translated.tex"
+    repairs = latex_service.create_translated_tex(
+        "证毕□ 说明", tex_path, title="标题"
+    )
+    content = tex_path.read_text(encoding="utf-8")
+
+    assert repairs == []
+    assert "\\newunicodechar{□}" in content
+    assert "\\xeCJKDeclareCharClass{CJK}{\"25A0 -> \"25FF" in content
+    # Prose proof marks are converted to math commands at write time
+    assert r"$\square$" in content
+    assert "□" not in content.replace("\\newunicodechar{□}", "")
+
+
+def test_create_translated_tex_returns_sqrt_repairs(tmp_path):
+    tex_path = tmp_path / "translated.tex"
+    markdown = "公式 ${ \\sqrt [ { k } / { A } }$ 结束"
+    repairs = latex_service.create_translated_tex(markdown, tex_path)
+
+    content = tex_path.read_text(encoding="utf-8")
+    assert repairs and repairs[0].startswith("L1:")
+    assert r"\sqrt[{ k }]{{ A }}}" in content

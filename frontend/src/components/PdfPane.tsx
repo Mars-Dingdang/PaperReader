@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
@@ -182,8 +182,35 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
   const isProgrammaticScrollRef = useRef(false)
   const pdfDocumentRef = useRef<any>(null)
   const scaleRef = useRef(1.0)
-  const pinchRef = useRef<{ distance: number; scale: number } | null>(null)
+  const zoomStackRef = useRef<HTMLDivElement | null>(null)
+  const pageRatiosRef = useRef<Array<number | null>>([])
+  const pendingAnchorRef = useRef<{
+    stackLayoutLeft: number
+    stackLayoutTop: number
+    originX: number
+    originY: number
+    localX: number
+    localY: number
+    ratio: number
+  } | null>(null)
+  const gestureRef = useRef({
+    active: false,
+    base: 1,
+    target: 1,
+    display: 1,
+    stackLayoutLeft: 0,
+    stackLayoutTop: 0,
+    originX: 0,
+    originY: 0,
+    localX: 0,
+    localY: 0,
+    raf: 0,
+    commitTimer: 0 as ReturnType<typeof setTimeout> | 0,
+    touchStart: null as { distance: number; scale: number } | null,
+    gestureStartScale: 1
+  })
   const [numPages, setNumPages] = useState(0)
+  const [ratioTick, setRatioTick] = useState(0)
   const [pageNumber, setPageNumber] = useState(1)
   const [scale, setScale] = useState(1.0)
   const [zoomInput, setZoomInput] = useState('100')
@@ -219,6 +246,19 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
     scaleRef.current = 1.0
     pdfDocumentRef.current = null
     pageRefs.current = []
+    pageRatiosRef.current = []
+    const gesture = gestureRef.current
+    gesture.active = false
+    gesture.touchStart = null
+    if (gesture.raf) cancelAnimationFrame(gesture.raf)
+    gesture.raf = 0
+    if (gesture.commitTimer) clearTimeout(gesture.commitTimer)
+    gesture.commitTimer = 0
+    if (zoomStackRef.current) {
+      zoomStackRef.current.style.transform = ''
+      zoomStackRef.current.style.willChange = ''
+    }
+    pendingAnchorRef.current = null
   }, [pdfUrl, overrideUrl])
 
   useEffect(() => {
@@ -231,7 +271,10 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
     })
     ro.observe(el)
     return () => ro.disconnect()
-  }, [])
+    // The .pdf-body element only exists once a URL is set; on a fresh load the
+    // first mount renders the empty branch, so the observer must re-attach
+    // when the PDF actually appears (otherwise fit-width stays broken).
+  }, [effectiveUrl])
 
   useEffect(() => {
     scaleRef.current = scale
@@ -242,33 +285,114 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
     const scroller = scrollRef.current
     if (!scroller || !effectiveUrl) return
 
-    const clampScale = (value: number) => Math.max(0.4, Math.min(3, Math.round(value * 100) / 100))
-    const zoomAt = (nextScale: number, clientX: number, clientY: number) => {
-      const previous = scaleRef.current
-      const next = clampScale(nextScale)
-      if (Math.abs(previous - next) < 0.005) return
-      const rect = scroller.getBoundingClientRect()
-      const localX = clientX - rect.left
-      const localY = clientY - rect.top
-      const contentX = scroller.scrollLeft + localX
-      const contentY = scroller.scrollTop + localY
-      const ratio = next / previous
-      scaleRef.current = next
-      setScale(next)
-      window.setTimeout(() => {
-        scroller.scrollLeft = contentX * ratio - localX
-        scroller.scrollTop = contentY * ratio - localY
-      }, 40)
+    const clampScale = (value: number) => Math.max(0.4, Math.min(3, value))
+    const gesture = gestureRef.current
+
+    const beginGesture = (clientX: number, clientY: number) => {
+      const stack = zoomStackRef.current
+      if (!stack) return
+      if (!gesture.active) {
+        const scrollerRect = scroller.getBoundingClientRect()
+        const stackRect = stack.getBoundingClientRect()
+        gesture.active = true
+        gesture.base = scaleRef.current
+        gesture.display = scaleRef.current
+        gesture.target = scaleRef.current
+        gesture.localX = clientX - scrollerRect.left
+        gesture.localY = clientY - scrollerRect.top
+        // Anchor in the stack's own (untransformed) coordinate space; the
+        // stack's layout offset inside the scroller's scroll content.
+        gesture.originX = clientX - stackRect.left
+        gesture.originY = clientY - stackRect.top
+        gesture.stackLayoutLeft = stackRect.left - scrollerRect.left + scroller.scrollLeft
+        gesture.stackLayoutTop = stackRect.top - scrollerRect.top + scroller.scrollTop
+        stack.style.willChange = 'transform'
+      }
+      if (gesture.commitTimer) clearTimeout(gesture.commitTimer)
+    }
+
+    const applyTransformFrame = () => {
+      gesture.raf = 0
+      const stack = zoomStackRef.current
+      if (!gesture.active || !stack) return
+      // Exponential smoothing turns discrete (possibly coarse) input events
+      // into continuous visual motion.
+      gesture.display += (gesture.target - gesture.display) * 0.35
+      if (Math.abs(gesture.target - gesture.display) < 0.0005) gesture.display = gesture.target
+      const k = gesture.display / gesture.base
+      stack.style.transformOrigin = `${gesture.originX}px ${gesture.originY}px`
+      stack.style.transform = `scale(${k})`
+      // Keep the anchor point glued under the cursor while the layout (and
+      // therefore the scroll range) is still at the base scale.
+      scroller.scrollLeft = gesture.stackLayoutLeft + gesture.originX * k - gesture.localX
+      scroller.scrollTop = gesture.stackLayoutTop + gesture.originY * k - gesture.localY
+      if (gesture.display !== gesture.target) {
+        gesture.raf = requestAnimationFrame(applyTransformFrame)
+      }
+    }
+
+    const commitGesture = () => {
+      if (gesture.commitTimer) {
+        clearTimeout(gesture.commitTimer)
+        gesture.commitTimer = 0
+      }
+      if (!gesture.active) return
+      const stack = zoomStackRef.current
+      const finalScale = clampScale(Math.round(gesture.target * 100) / 100)
+      const ratio = finalScale / gesture.base
+      gesture.active = false
+      if (gesture.raf) cancelAnimationFrame(gesture.raf)
+      gesture.raf = 0
+      if (stack) {
+        stack.style.transform = ''
+        stack.style.willChange = ''
+      }
+      // Layout catches up when React re-renders with the new scale; once it
+      // has, re-anchor the scroll so the gesture focal point stays put.
+      pendingAnchorRef.current = {
+        stackLayoutLeft: gesture.stackLayoutLeft,
+        stackLayoutTop: gesture.stackLayoutTop,
+        originX: gesture.originX,
+        originY: gesture.originY,
+        localX: gesture.localX,
+        localY: gesture.localY,
+        ratio
+      }
+      scaleRef.current = finalScale
+      setScale(finalScale)
+    }
+
+    const scheduleCommit = () => {
+      if (gesture.commitTimer) clearTimeout(gesture.commitTimer)
+      gesture.commitTimer = setTimeout(commitGesture, 220)
+    }
+
+    const updateTarget = (nextScale: number, clientX: number, clientY: number) => {
+      beginGesture(clientX, clientY)
+      if (!gesture.active) return
+      gesture.target = clampScale(nextScale)
+      if (!gesture.raf) gesture.raf = requestAnimationFrame(applyTransformFrame)
+      scheduleCommit()
     }
 
     const onWheel = (event: WheelEvent) => {
-      // Desktop trackpad pinch gestures are exposed as ctrl+wheel by Chromium.
+      // Desktop trackpad pinch gestures are exposed as ctrl+wheel by
+      // Chromium/WebView2; Safari/WKWebView additionally emits gesturechange.
       if (!event.ctrlKey) return
       event.preventDefault()
       event.stopPropagation()
-      const factor = Math.exp(-event.deltaY * 0.01)
-      zoomAt(scaleRef.current * factor, event.clientX, event.clientY)
+      let dy = event.deltaY
+      if (event.deltaMode === 1) dy *= 33 // lines (Safari keyboard)
+      else if (event.deltaMode === 2) dy *= scroller.clientHeight // pages
+      // Normalize across platforms: Windows precision touchpads emit few,
+      // coarse deltas (±53..±120) while macOS emits many tiny ones (±1..±3).
+      // Clamp the per-event factor so a coarse Windows notch cannot jump
+      // 2-3x in a single event, then let the rAF lerp smooth it out.
+      const factor = Math.exp(-dy * 0.01)
+      const clamped = Math.min(1.12, Math.max(1 / 1.12, factor))
+      updateTarget((gesture.active ? gesture.target : scaleRef.current) * clamped, event.clientX, event.clientY)
     }
+
     const distance = (touches: TouchList) => {
       const dx = touches[0].clientX - touches[1].clientX
       const dy = touches[0].clientY - touches[1].clientY
@@ -276,32 +400,73 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
     }
     const onTouchStart = (event: TouchEvent) => {
       if (event.touches.length !== 2) return
-      pinchRef.current = { distance: distance(event.touches), scale: scaleRef.current }
+      gesture.touchStart = { distance: distance(event.touches), scale: gesture.active ? gesture.target : scaleRef.current }
     }
     const onTouchMove = (event: TouchEvent) => {
-      if (event.touches.length !== 2 || !pinchRef.current) return
+      if (event.touches.length !== 2 || !gesture.touchStart) return
       event.preventDefault()
       event.stopPropagation()
       const midpointX = (event.touches[0].clientX + event.touches[1].clientX) / 2
       const midpointY = (event.touches[0].clientY + event.touches[1].clientY) / 2
-      const ratio = distance(event.touches) / Math.max(1, pinchRef.current.distance)
-      zoomAt(pinchRef.current.scale * ratio, midpointX, midpointY)
+      const ratio = distance(event.touches) / Math.max(1, gesture.touchStart.distance)
+      updateTarget(gesture.touchStart.scale * ratio, midpointX, midpointY)
     }
-    const onTouchEnd = () => { pinchRef.current = null }
+    const onTouchEnd = () => {
+      gesture.touchStart = null
+      if (gesture.active) commitGesture()
+    }
+
+    // WebKit (Safari / WKWebView on macOS) reports trackpad pinch via
+    // non-standard gesture events instead of ctrl+wheel.
+    const onGestureStart = (event: any) => {
+      event.preventDefault()
+      gesture.gestureStartScale = gesture.active ? gesture.target : scaleRef.current
+    }
+    const onGestureChange = (event: any) => {
+      event.preventDefault()
+      if (!event.scale) return
+      updateTarget(gesture.gestureStartScale * event.scale, event.clientX, event.clientY)
+    }
+    const onGestureEnd = (event: any) => {
+      event.preventDefault()
+      if (gesture.active) commitGesture()
+    }
 
     scroller.addEventListener('wheel', onWheel, { passive: false })
     scroller.addEventListener('touchstart', onTouchStart, { passive: true })
     scroller.addEventListener('touchmove', onTouchMove, { passive: false })
     scroller.addEventListener('touchend', onTouchEnd)
     scroller.addEventListener('touchcancel', onTouchEnd)
+    scroller.addEventListener('gesturestart', onGestureStart as EventListener)
+    scroller.addEventListener('gesturechange', onGestureChange as EventListener)
+    scroller.addEventListener('gestureend', onGestureEnd as EventListener)
     return () => {
       scroller.removeEventListener('wheel', onWheel)
       scroller.removeEventListener('touchstart', onTouchStart)
       scroller.removeEventListener('touchmove', onTouchMove)
       scroller.removeEventListener('touchend', onTouchEnd)
       scroller.removeEventListener('touchcancel', onTouchEnd)
+      scroller.removeEventListener('gesturestart', onGestureStart as EventListener)
+      scroller.removeEventListener('gesturechange', onGestureChange as EventListener)
+      scroller.removeEventListener('gestureend', onGestureEnd as EventListener)
+      if (gesture.raf) cancelAnimationFrame(gesture.raf)
+      gesture.raf = 0
+      if (gesture.commitTimer) clearTimeout(gesture.commitTimer)
+      gesture.commitTimer = 0
+      gesture.active = false
     }
   }, [effectiveUrl])
+
+  // After a zoom commit re-renders the pages at the new scale, restore the
+  // scroll position so the gesture anchor stays under the cursor.
+  useLayoutEffect(() => {
+    const anchor = pendingAnchorRef.current
+    const scroller = scrollRef.current
+    if (!anchor || !scroller) return
+    pendingAnchorRef.current = null
+    scroller.scrollLeft = anchor.stackLayoutLeft + anchor.originX * anchor.ratio - anchor.localX
+    scroller.scrollTop = anchor.stackLayoutTop + anchor.originY * anchor.ratio - anchor.localY
+  }, [scale])
 
   const fileOpts = useMemo(() => (effectiveUrl ? { url: effectiveUrl, withCredentials: true } : null), [effectiveUrl])
 
@@ -325,6 +490,23 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
     pdfDocumentRef.current = doc
     setNumPages(doc.numPages)
     pageRefs.current = new Array(doc.numPages).fill(null)
+    pageRatiosRef.current = new Array(doc.numPages).fill(null)
+    // Page aspect ratios come from the page dictionaries (no rendering), so
+    // the wrappers can be sized deterministically from the very first render
+    // onward — independent of when canvas draws complete.
+    doc.getPage(1).then((first: any) => {
+      const fallback = first.view[3] / first.view[2]
+      Promise.all(
+        Array.from({ length: doc.numPages }, (_, i) =>
+          doc.getPage(i + 1).then((p: any) => p.view[3] / p.view[2]).catch(() => fallback)
+        )
+      ).then((ratios: number[]) => {
+        if (pdfDocumentRef.current === doc) {
+          pageRatiosRef.current = ratios
+          setRatioTick((t) => t + 1)
+        }
+      })
+    }).catch(() => {})
     setOutlineLoading(true)
     setOutlineReady(false)
     try {
@@ -575,6 +757,22 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
     }
   }
 
+  // Capture each page's intrinsic aspect ratio once (from the PDF page
+  // dictionaries at load) so the page wrappers can be sized synchronously on
+  // every scale change; without stable sizes the layout collapses while
+  // react-pdf redraws the canvases asynchronously, which used to yank the
+  // scroll position on every zoom step.
+  const pageSlotStyle = (
+    pageIndex: number,
+    extraHeight = 0
+  ): React.CSSProperties | undefined => {
+    void ratioTick // ratios arrive async; bump forces wraps to re-render sized
+    const ratio = pageRatiosRef.current[pageIndex]
+    if (!ratio || !containerWidth) return undefined
+    const width = containerWidth * scale
+    return { width, height: width * ratio + extraHeight }
+  }
+
   if (!effectiveUrl) {
     return (
       <div
@@ -715,9 +913,13 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
           >
             {numPages > 0 && mode === 'single' && (
               <div
-                className="pdf-page-wrap"
+                className="pdf-page-wrap pdf-zoom-stack"
                 data-pdf-page={pageNumber}
-                ref={(el) => { pageRefs.current[pageNumber - 1] = el }}
+                style={pageSlotStyle(pageNumber - 1)}
+                ref={(el) => {
+                  pageRefs.current[pageNumber - 1] = el
+                  zoomStackRef.current = el
+                }}
               >
                 <Page
                   pageNumber={pageNumber}
@@ -729,12 +931,13 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
               </div>
             )}
             {numPages > 0 && mode === 'scroll' && (
-              <div className="pdf-scroll-stack">
+              <div className="pdf-scroll-stack" ref={(el) => { zoomStackRef.current = el }}>
                 {Array.from({ length: numPages }, (_, i) => (
                   <div
                     key={`page-${i + 1}`}
                     className="pdf-page-wrap"
                     data-pdf-page={i + 1}
+                    style={pageSlotStyle(i, 24)}
                     ref={(el) => {
                       pageRefs.current[i] = el
                     }}

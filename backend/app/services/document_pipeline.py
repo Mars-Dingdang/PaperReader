@@ -29,6 +29,7 @@ from app.services.mineru_layout import (
     collect_translatable_strings,
 )
 from app.services.alignment_service import save_exact_alignment
+from app.services.latex_sanitizer import validate_math_structure
 from app.services.mineru_service import (
     MinerUConfig,
     extract_structured_from_pdf,
@@ -409,6 +410,12 @@ def process_document(
                 record.translated_tex_path = translated_tex
                 _append_artifact(record, "translated.tex", "translated_tex", translated_tex)
                 record.logs.append(f"Translated TEX: {translated_tex}")
+                structure_issues = validate_math_structure(record.translated_text)
+                if structure_issues:
+                    digest = "; ".join(f"L{line}: {msg}" for line, msg in structure_issues[:5])
+                    record.logs.append(
+                        f"LaTeX structure check found {len(structure_issues)} issue(s): {digest}"
+                    )
 
                 _publish_translated_pdf(record, translated_pdf, output_dir)
 
@@ -545,13 +552,15 @@ def process_document(
                             f"Saved {len(source_alignment_segments)} exact bilingual alignment segments"
                         )
                     record.translated_text = _ir_to_translated_markdown(ir_blocks)
-                    create_translated_tex_from_ir(
+                    repairs = create_translated_tex_from_ir(
                         ir_blocks,
                         translated_tex,
                         images_src_dir=mineru_result.images_dir,
                         title=display_title,
                         two_column=mineru_result.two_column,
                     )
+                    for note in repairs:
+                        record.logs.append(f"Repaired OCR math fault at {note}")
                     if mineru_result.images_dir and mineru_result.images_dir.is_dir():
                         copied = sum(1 for _ in mineru_result.images_dir.iterdir())
                         record.logs.append(f"Copied {copied} image(s) into translated project")
@@ -564,10 +573,19 @@ def process_document(
                         override_model=override_model,
                     )
                     record.translated_text = translated
-                    create_translated_tex(translated, translated_tex, title=display_title)
+                    repairs = create_translated_tex(translated, translated_tex, title=display_title)
+                    for note in repairs:
+                        record.logs.append(f"Repaired OCR math fault at {note}")
 
                 _append_artifact(record, "translated.tex", "translated_tex", translated_tex)
                 record.logs.append(f"Translated TEX: {translated_tex}")
+                tex_content = translated_tex.read_text(encoding="utf-8", errors="ignore")
+                structure_issues = validate_math_structure(tex_content)
+                if structure_issues:
+                    digest = "; ".join(f"L{line}: {msg}" for line, msg in structure_issues[:5])
+                    record.logs.append(
+                        f"LaTeX structure check found {len(structure_issues)} issue(s): {digest}"
+                    )
 
             with with_stage(record, "latex_build"):
                 compile_result = compile_tex_project_with_fallback(

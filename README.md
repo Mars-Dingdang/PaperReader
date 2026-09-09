@@ -1,8 +1,8 @@
-# PaperReader v2.1.4
+# PaperReader v2.1.5
 
-[Download Windows / macOS v2.1.4](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.4) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.4.md)
+[Download Windows / macOS v2.1.5](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.5) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.5.md)
 
-v2.1.4 makes the Windows application reliably startable and is the first officially supported Windows build: the desktop window stack is pinned to `pythonnet 3.0.5` / `clr-loader 0.2.7.post0` (pythonnet 3.1.0's runtime DLL cannot be initialized by the .NET Framework host inside the frozen EXE, so earlier v2.1.x Windows packages could fail before any window appeared), local builds pin `setuptools 65.5.0` to fix a packaged-startup crash, and the release smoke test now also initializes the packaged GUI stack. Windows users on any earlier v2.1.x build should switch to the v2.1.4 ZIP. Frontend/API package version: `2.1.4`.
+v2.1.5 fixes two regressions that could abort a structured (MinerU) PDF translation right after the bilingual alignment step (a missing return value raised `'NoneType' object is not iterable`, and the Unicode sanitizer mangled the preamble's `\newunicodechar` declarations into `Invalid argument` compile errors), and adds precise LaTeX diagnostics: fatal errors are reported with source line numbers, missing glyphs with suggested replacements, OCR `\sqrt` faults are repaired automatically with an audit trail, and the translated TeX can be edited in a CodeMirror 6 editor with search & replace and line jumps from compile-error panels. Frontend/API package version: `2.1.5`.
 
 Windows users: extract the complete ZIP and run `PaperReader.exe`. Apple Silicon Mac users: open the DMG and copy PaperReader to Applications. Both builds show the provider setup wizard on first launch. TeX Live / `latexmk` and the selected TeX engine are still required for translated PDF generation; projects without a declaration use XeLaTeX by default. See the [Windows guide](desktop/README_zh.md) and [macOS guide](desktop/README_macos_zh.md).
 

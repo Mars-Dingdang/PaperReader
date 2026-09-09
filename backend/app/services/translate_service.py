@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, TypeVar
 
 from app.core.config import settings
-from app.services.latex_sanitizer import sanitize_latex_body
+from app.services.latex_sanitizer import sanitize_and_repair
 from app.services.llm_client import LLMOutputTruncatedError, llm_client
 from app.services.mineru_layout import (
     Block,
@@ -315,7 +315,9 @@ def translate_latex_document(
     except ValueError:
         translated_body = translated
 
-    translated_body = sanitize_latex_body(translated_body.strip())
+    translated_body, repairs = sanitize_and_repair(translated_body.strip())
+    for note in repairs:
+        logger.info("Repaired OCR math fault at %s", note)
     return f"{prefix}\n{translated_body}\n{suffix}"
 
 

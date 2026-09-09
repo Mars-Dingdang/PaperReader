@@ -1,7 +1,7 @@
 {
   "name": "paper-reader-frontend",
   "private": true,
-  "version": "2.1.4",
+  "version": "2.1.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,6 +9,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@codemirror/legacy-modes": "^6.5.4",
+    "@codemirror/search": "^6.7.2",
+    "@codemirror/state": "^6.7.4",
+    "@codemirror/view": "^6.43.11",
+    "codemirror": "^6.0.2",
     "katex": "^0.16.45",
     "lucide-react": "^1.11.0",
     "pdfjs-dist": "^4.8.69",

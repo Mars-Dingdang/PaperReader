@@ -25,7 +25,7 @@ from app.core.database import init_database
 mimetypes.add_type("text/javascript", ".mjs")
 
 
-app = FastAPI(title="PaperReader", version="2.1.4")
+app = FastAPI(title="PaperReader", version="2.1.5")
 
 app.add_middleware(
     CORSMiddleware,

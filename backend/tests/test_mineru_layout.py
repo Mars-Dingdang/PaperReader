@@ -10,7 +10,7 @@ from app.services.mineru_layout import (
     collect_translatable_strings,
     apply_translations,
 )
-from app.services.latex_service import render_ir_to_tex
+from app.services.latex_service import create_translated_tex_from_ir, render_ir_to_tex
 
 
 SAMPLE_PAGES = [
@@ -225,3 +225,13 @@ def test_escape_special_characters_in_text_only():
     # Text & is escaped, but math content is preserved verbatim.
     assert "Math \\& code: 50\\% done \\#1" in tex
     assert "a & b \\\\ c & d" in tex
+
+
+def test_create_translated_tex_from_ir_returns_iterable_repairs(tmp_path):
+    # Regression: the function used to fall through without returning, so the
+    # pipeline's `for note in repairs:` raised "'NoneType' object is not iterable".
+    ir = blocks_to_ir(SAMPLE_PAGES)
+    repairs = create_translated_tex_from_ir(ir, tmp_path / "translated.tex", title="Paper")
+    assert isinstance(repairs, list)
+    tex_written = (tmp_path / "translated.tex").read_text(encoding="utf-8")
+    assert "\\begin{document}" in tex_written

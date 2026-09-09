@@ -1,5 +1,13 @@
 # Upgrading PaperReader
 
+## Upgrading from v2.1.4 to v2.1.5
+
+PaperReader v2.1.5 is a backward-compatible patch release and requires no data migration. Keep the existing `DATA_DIR`, `SQLITE_DB_NAME`, `AUTH_SECRET_KEY`, account database, and user settings.
+
+v2.1.5 fixes two regressions in the structured (MinerU) translation pipeline. First, documents whose translation reached the TeX rendering step failed with `Error: 'NoneType' object is not iterable`: `create_translated_tex_from_ir` computed OCR math-fault repair notes but returned nothing, and the pipeline's loop over those notes aborted the document right after "Saved N exact bilingual alignment segments". Second, translated PDFs could fail to compile with `Package newunicodechar Error: Invalid argument`: the Unicode sanitizer rewrote the preamble's `\newunicodechar{□}{...}` declarations — whose first argument must remain a single literal character — into e.g. `\newunicodechar{$\square$}`; sanitization is now applied only to the document body between `\begin{document}` and `\end{document}`, which also protects the manual-recompile endpoint. On top of the fixes, LaTeX compile failures now report fatal errors with source line numbers and missing glyphs with suggested replacements, MinerU `\sqrt` OCR faults (radicand swallowed into the root index) are repaired automatically with a logged audit trail, and the translated TeX can be edited in an in-app CodeMirror 6 editor with search & replace, line jumps from compile-error panels, and reveal-in-explorer / open-in-VS-Code actions.
+
+Frontend, package-lock root metadata, API, release smoke checks, and release notes are synchronized to `2.1.5`; the Git tag is `v2.1.5`.
+
 ## Upgrading from v2.1.3 to v2.1.4
 
 PaperReader v2.1.4 is a backward-compatible patch release and requires no data migration. Keep the existing `DATA_DIR`, `SQLITE_DB_NAME`, `AUTH_SECRET_KEY`, account database, and user settings.

@@ -25,10 +25,12 @@ plan.md
 backend/data/
 
 0413problem.pdf
-testexamples/
+# testexamples/
 redbook.md
+.zcode/
 
 *.zip
 PaperReader-v*.zip
 PaperReader-v*.tar.gz
 PaperReader-v*/
+*.sha256

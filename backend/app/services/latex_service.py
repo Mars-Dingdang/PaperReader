@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from app.core.config import settings
-from app.services.latex_sanitizer import sanitize_latex_body
+from app.services.latex_sanitizer import sanitize_and_repair
 from app.services.mineru_layout import (
     Author,
     Block,
@@ -116,11 +116,24 @@ class LatexCompileResult:
     `warning` is set when the strict pass failed but a successful lenient
     `-f` pass produced a PDF; it contains the original strict-mode error
     detail so the UI can surface it without aborting the pipeline.
+
+    `errors` (``[{line, message}]``) and `missing_chars`
+    (``[{char, codepoint, count, suggest}]``) are parsed from the TeX log so
+    callers can surface precise, actionable diagnostics.
     """
 
-    def __init__(self, pdf_path: Path, warning: str | None = None) -> None:
+    def __init__(
+        self,
+        pdf_path: Path,
+        warning: str | None = None,
+        *,
+        errors: list[dict] | None = None,
+        missing_chars: list[dict] | None = None,
+    ) -> None:
         self.pdf_path = pdf_path
         self.warning = warning
+        self.errors = errors or []
+        self.missing_chars = missing_chars or []
 
 
 def _normalize_latex_compiler(value: object) -> str | None:
@@ -219,6 +232,69 @@ def _run_latexmk(
     )
 
 
+_LOG_LINE_REF_RE = re.compile(r"^l\.(\d+)")
+_LOG_MISSING_CHAR_RE = re.compile(r"Missing character: There is no (.+?) \(U\+([0-9A-Fa-f]+)\)")
+
+
+def parse_latex_log_issues(log_path: Path) -> tuple[list[dict], list[dict]]:
+    """Extract actionable diagnostics from a TeX engine .log file.
+
+    Returns ``(errors, missing_chars)`` where errors are
+    ``{"line": int | None, "message": str}`` from fatal ``!`` lines (with the
+    ``l.<n>`` source line echoed right after them) and missing_chars are
+    ``{"char", "codepoint", "count", "suggest"}`` aggregated from
+    ``Missing character`` warnings.
+    """
+    errors: list[dict] = []
+    missing: dict[str, dict] = {}
+    try:
+        content = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return errors, list(missing.values())
+
+    from app.services.latex_sanitizer import replacement_for
+
+    lines = content.splitlines()
+    seen: set[tuple[int | None, str]] = set()
+    for idx, line in enumerate(lines):
+        fatal = re.match(r"^!\s+(.+?)\s*$", line)
+        if fatal:
+            tex_line: int | None = None
+            for follow in lines[idx + 1 : idx + 6]:
+                line_ref = _LOG_LINE_REF_RE.match(follow)
+                if line_ref:
+                    tex_line = int(line_ref.group(1))
+                    break
+            key = (tex_line, fatal.group(1))
+            if key not in seen and len(errors) < 20:
+                seen.add(key)
+                errors.append({"line": tex_line, "message": fatal.group(1)})
+
+        for miss in _LOG_MISSING_CHAR_RE.finditer(line):
+            ch = miss.group(1) or " "
+            entry = missing.setdefault(
+                ch,
+                {
+                    "char": ch,
+                    "codepoint": f"U+{miss.group(2)}",
+                    "count": 0,
+                    "suggest": replacement_for(ch),
+                },
+            )
+            entry["count"] += 1
+    return errors, list(missing.values())
+
+
+def _summarize_missing_chars(missing_chars: list[dict]) -> str:
+    parts = []
+    for entry in missing_chars:
+        piece = f"{entry['char']!r} ({entry['codepoint']}) x{entry['count']}"
+        if entry.get("suggest"):
+            piece += f" -> replace with ${entry['suggest']}$"
+        parts.append(piece)
+    return "; ".join(parts)
+
+
 def compile_tex_project_with_fallback(
     tex_path: Path,
     output_dir: Path,
@@ -241,6 +317,7 @@ def compile_tex_project_with_fallback(
     output_dir.mkdir(parents=True, exist_ok=True)
     expected_pdf = output_dir / (tex_path.stem + ".pdf")
     fdb_path = output_dir / f"{tex_path.stem}.fdb_latexmk"
+    log_path = output_dir / f"{tex_path.stem}.log"
 
     # Never let a stale or partially written PDF from an earlier failed pass
     # masquerade as the result of this compile attempt.
@@ -252,12 +329,19 @@ def compile_tex_project_with_fallback(
 
     strict = _run_latexmk(tex_path, output_dir, force=False, compiler=compiler)
     if strict.returncode == 0 and expected_pdf.exists():
-        return LatexCompileResult(expected_pdf)
+        errors, missing_chars = parse_latex_log_issues(log_path)
+        warning = None
+        if missing_chars:
+            warning = (
+                f"PDF compiled, but {len(missing_chars)} character(s) are missing "
+                f"from the font and render as blank: {_summarize_missing_chars(missing_chars)}"
+            )
+            logger.warning(warning)
+        return LatexCompileResult(expected_pdf, warning=warning, errors=errors, missing_chars=missing_chars)
 
     strict_detail = (strict.stderr or strict.stdout or "").strip()
     if len(strict_detail) > 800:
         strict_detail = strict_detail[-800:]
-    log_path = output_dir / f"{tex_path.stem}.log"
     logger.warning("latexmk strict pass failed (rc=%s); retrying with -f", strict.returncode)
 
     # A failed strict TeX pass may already have emitted a truncated PDF.
@@ -268,18 +352,39 @@ def compile_tex_project_with_fallback(
     fdb_path.unlink(missing_ok=True)
     lenient = _run_latexmk(tex_path, output_dir, force=True, compiler=compiler)
     if lenient.returncode == 0 and expected_pdf.exists():
+        errors, missing_chars = parse_latex_log_issues(log_path)
         warning = (
             f"LaTeX strict compile failed but a PDF was produced via -f. "
             f"log={log_path}. strict_details={strict_detail}"
         )
+        if missing_chars:
+            warning += f" Missing glyphs: {_summarize_missing_chars(missing_chars)}"
         logger.warning(warning)
-        return LatexCompileResult(expected_pdf, warning=warning)
+        return LatexCompileResult(
+            expected_pdf, warning=warning, errors=errors, missing_chars=missing_chars
+        )
 
     lenient_detail = (lenient.stderr or lenient.stdout or "").strip()
     if len(lenient_detail) > 800:
         lenient_detail = lenient_detail[-800:]
-    detail = " | ".join(part for part in (strict_detail, lenient_detail) if part)
-    raise RuntimeError(f"LaTeX compile failed. log={log_path}. details={detail}")
+
+    # Prefer a structured digest of the log (fatal errors with source line
+    # numbers, missing glyphs) over the raw subprocess tail, which is usually
+    # flooded by "Missing character" warnings that hide the real error.
+    errors, missing_chars = parse_latex_log_issues(log_path)
+    parts = [f"LaTeX compile failed. log={log_path}"]
+    if errors:
+        digest = "; ".join(
+            f"L{e['line']}: {e['message']}" if e.get("line") else str(e["message"])
+            for e in errors[:5]
+        )
+        parts.append(f"errors: {digest}")
+    if missing_chars:
+        parts.append(f"missing glyphs: {_summarize_missing_chars(missing_chars)}")
+    if not errors and not missing_chars:
+        detail = " | ".join(part for part in (strict_detail, lenient_detail) if part)
+        parts.append(f"details={detail}")
+    raise RuntimeError(". ".join(parts))
 
 
 def compile_tex_project(tex_path: Path, output_dir: Path, *, compiler: str | None = None) -> Path:
@@ -308,10 +413,15 @@ def _escape_latex_text(text: str) -> str:
     return out
 
 
-def create_translated_tex(source_text: str, out_tex_path: Path, title: str | None = None) -> None:
+def create_translated_tex(source_text: str, out_tex_path: Path, title: str | None = None) -> list[str]:
+    """Write a translated .tex from markdown fallback text.
+
+    Returns the list of OCR math-fault repair notes (empty when nothing had
+    to be fixed).
+    """
     out_tex_path.parent.mkdir(parents=True, exist_ok=True)
     body = _markdown_to_latex_fallback(source_text)
-    body = sanitize_latex_body(body)
+    body, repairs = sanitize_and_repair(body)
     title_block = ""
     if title and title.strip():
         title_text = _escape_latex_text(title.strip())
@@ -320,11 +430,12 @@ def create_translated_tex(source_text: str, out_tex_path: Path, title: str | Non
 \\documentclass[12pt]{{article}}
 \\usepackage[UTF8]{{ctex}}
 \\usepackage{{amsmath,amssymb,graphicx,hyperref}}
-\\begin{{document}}
+{_UNICODE_FALLBACK_PREAMBLE}\\begin{{document}}
 {title_block}{body}
 \\end{{document}}
 """.strip()
     out_tex_path.write_text(content, encoding="utf-8")
+    return repairs
 
 
 def copy_pdf_to_output(source_pdf: Path, output_pdf: Path) -> None:
@@ -338,6 +449,27 @@ def copy_pdf_to_output(source_pdf: Path, output_pdf: Path) -> None:
 # IR-based rendering (preferred path for MinerU structured output)
 # ---------------------------------------------------------------------------
 
+# Safety net for Unicode symbols that Latin Modern lacks (proof marks like
+# □, bullets, stars, check marks …). Two layers:
+#   1. explicit \newunicodechar mappings for the most common proof symbols;
+#   2. \xeCJKDeclareCharClass routes whole symbol blocks (geometric shapes,
+#      misc symbols, dingbats) to the CJK font, which covers them via
+#      GB2312 — this catches anything the curated list misses, including
+#      characters the user types later in the TeX editor.
+# Valid because translated documents always compile with XeLaTeX + ctex
+# (which loads xeCJK).
+_UNICODE_FALLBACK_PREAMBLE = """\\usepackage{newunicodechar}
+\\newunicodechar{□}{\\ensuremath{\\square}}
+\\newunicodechar{■}{\\ensuremath{\\blacksquare}}
+\\newunicodechar{●}{\\ensuremath{\\bullet}}
+\\newunicodechar{○}{\\ensuremath{\\circ}}
+\\newunicodechar{★}{\\ensuremath{\\bigstar}}
+\\newunicodechar{☆}{\\ensuremath{\\bigstar}}
+\\newunicodechar{✓}{\\ensuremath{\\checkmark}}
+\\newunicodechar{✗}{\\ensuremath{\\times}}
+\\xeCJKDeclareCharClass{CJK}{"25A0 -> "25FF, "2600 -> "26FF, "2700 -> "27BF}
+"""
+
 _TEX_DOCUMENT_TEMPLATE = """\\documentclass[{documentclass_opts}]{{article}}
 \\usepackage[UTF8]{{ctex}}
 \\usepackage{{amsmath,amssymb,amsfonts,mathrsfs}}
@@ -345,7 +477,7 @@ _TEX_DOCUMENT_TEMPLATE = """\\documentclass[{documentclass_opts}]{{article}}
 \\usepackage{{float}}
 \\usepackage{{caption}}
 \\usepackage{{hyperref}}
-\\graphicspath{{{{./images/}}}}
+{unicode_fallback}\\graphicspath{{{{./images/}}}}
 \\begin{{document}}
 {title_block}{body}
 \\end{{document}}
@@ -602,7 +734,10 @@ def render_ir_to_tex(
     body = "\n\n".join(rendered_blocks).strip() + "\n"
     documentclass_opts = "10pt,twocolumn" if two_column else "12pt"
     return _TEX_DOCUMENT_TEMPLATE.format(
-        documentclass_opts=documentclass_opts, title_block=title_block, body=body
+        documentclass_opts=documentclass_opts,
+        unicode_fallback=_UNICODE_FALLBACK_PREAMBLE,
+        title_block=title_block,
+        body=body,
     )
 
 
@@ -613,13 +748,17 @@ def create_translated_tex_from_ir(
     title: str | None = None,
     authors: str | None = None,
     two_column: bool = False,
-) -> None:
-    """Write `translated.tex` from an IR list and copy `images/` next to it."""
+) -> list[str]:
+    """Write `translated.tex` from an IR list and copy `images/` next to it.
+
+    Returns the list of OCR math-fault repair notes (empty when the rendered
+    document needed no fixing).
+    """
     out_tex_path.parent.mkdir(parents=True, exist_ok=True)
     tex = render_ir_to_tex(
         ir, title=title, authors=authors, two_column=two_column
     )
-    tex = sanitize_latex_body(tex)
+    tex, repairs = sanitize_and_repair(tex)
     out_tex_path.write_text(tex, encoding="utf-8")
 
     if images_src_dir and images_src_dir.is_dir():
@@ -628,3 +767,5 @@ def create_translated_tex_from_ir(
             if target.exists():
                 shutil.rmtree(target)
             shutil.copytree(images_src_dir, target)
+
+    return repairs

@@ -6,6 +6,11 @@ We split the body into math vs. prose regions and only rewrite prose: each
 unsupported codepoint is wrapped in inline math (e.g. ``ε`` -> ``$\\varepsilon$``).
 Characters that already live inside ``$...$`` / ``\\[...\\]`` / a math
 environment are left untouched.
+
+Additionally this module repairs well-known MinerU/OCR math faults (e.g. a
+``\\sqrt`` whose radicand was swallowed into the root index) and lints the
+document for structural problems (unbalanced ``$``/braces) so failures can
+be reported with line numbers instead of a raw latexmk tail.
 """
 
 from __future__ import annotations
@@ -42,6 +47,21 @@ _CHAR_TO_LATEX: dict[str, str] = {
     "ℝ": r"\mathbb{R}", "ℕ": r"\mathbb{N}", "ℤ": r"\mathbb{Z}",
     "ℚ": r"\mathbb{Q}", "ℂ": r"\mathbb{C}",
     "·": r"\cdot",
+    # Proof marks / geometric shapes / dingbats that Latin Modern lacks but
+    # amssymb provides. Common in CJK lecture notes and OCR output (□ marks
+    # the end of a proof in Chinese textbooks).
+    "□": r"\square", "■": r"\blacksquare", "▪": r"\blacksquare",
+    "▫": r"\square", "◻": r"\square", "◼": r"\blacksquare",
+    "◽": r"\square", "◾": r"\blacksquare",
+    "●": r"\bullet", "○": r"\circ", "◦": r"\bullet", "◎": r"\circ",
+    "★": r"\bigstar", "☆": r"\bigstar",
+    "♠": r"\spadesuit", "♤": r"\spadesuit",
+    "♥": r"\heartsuit", "♡": r"\heartsuit",
+    "♦": r"\diamondsuit", "♢": r"\diamondsuit",
+    "♣": r"\clubsuit", "♧": r"\clubsuit",
+    "✓": r"\checkmark", "✔": r"\checkmark",
+    "✗": r"\times", "✘": r"\times", "✕": r"\times",
+    "℃": r"{}^{\circ}\mathrm{C}",
 }
 
 _MATH_ENV_NAMES = (
@@ -90,6 +110,28 @@ def sanitize_latex_body(text: str) -> str:
     return "".join(out)
 
 
+_BEGIN_DOC = "\\begin{document}"
+_END_DOC = "\\end{document}"
+
+
+def _split_document(text: str) -> tuple[str, str, str] | None:
+    """Split a complete LaTeX document into (preamble, body, tail).
+
+    Returns None when `text` is not a full document (no/invalid
+    \\begin{document} ... \\end{document} frame) — e.g. a bare body passed
+    in from the translate path.
+    """
+    begin = text.find(_BEGIN_DOC)
+    end = text.rfind(_END_DOC)
+    if begin == -1 or end == -1 or end < begin:
+        return None
+    return (
+        text[: begin + len(_BEGIN_DOC)],
+        text[begin + len(_BEGIN_DOC) : end],
+        text[end:],
+    )
+
+
 def find_unsupported_chars(text: str) -> set[str]:
     """Return the set of characters in `text` that are mapped (i.e. would be
     rewritten by sanitize_latex_body) and currently appear in prose regions.
@@ -108,3 +150,168 @@ def find_unsupported_chars(text: str) -> set[str]:
         if ch in _CHAR_TO_LATEX:
             found.add(ch)
     return found
+
+
+# ---------------------------------------------------------------------------
+# Font-coverage diagnostics
+# ---------------------------------------------------------------------------
+
+# Routers (xeCJK/ctex) already hand these blocks to the CJK font, so their
+# codepoints are compile-safe even though Latin Modern lacks the glyphs.
+_CJK_SAFE_RANGES = (
+    (0x3000, 0x303F),   # CJK symbols and punctuation （ 、 。 「 」 …）
+    (0x3400, 0x4DBF),   # CJK extension A
+    (0x4E00, 0x9FFF),   # CJK unified ideographs
+    (0xF900, 0xFAFF),   # CJK compatibility ideographs
+    (0xFF00, 0xFFEF),   # fullwidth forms （ ！ ？ ， ）
+    (0x20000, 0x2A6DF), # CJK extension B
+)
+
+# Non-ASCII codepoints that Latin Modern does provide (quotes, dashes,
+# ellipsis, degree sign, daggers, middle dots, spaces).
+_FONT_SAFE_EXTRAS = set("‘’“”„‚‛‹›«»–—…•·°†‡℃\u00a0\u2002\u2003\u2007\u2009\u202f")
+
+
+def replacement_for(ch: str) -> str | None:
+    """LaTeX command that `sanitize_latex_body` would substitute for `ch`
+    (without the surrounding ``$...$``), or None when unmapped.
+    """
+    return _CHAR_TO_LATEX.get(ch)
+
+
+def _is_font_safe_char(ch: str) -> bool:
+    code = ord(ch)
+    if code < 0x80:
+        return True
+    if ch in _CHAR_TO_LATEX:
+        return True  # sanitize_latex_body converts it to a command
+    if ch in _FONT_SAFE_EXTRAS:
+        return True
+    return any(lo <= code <= hi for lo, hi in _CJK_SAFE_RANGES)
+
+
+def detect_font_unsafe_chars(text: str) -> dict[str, int]:
+    """Count non-ASCII characters that no configured font is known to cover
+    and that no LaTeX replacement exists for. These are the characters likely
+    to trigger ``Missing character`` warnings (or worse) at compile time.
+    """
+    found: dict[str, int] = {}
+    for ch in text:
+        if ch in ("\n", "\r", "\t"):
+            continue
+        if not _is_font_safe_char(ch):
+            found[ch] = found.get(ch, 0) + 1
+    return found
+
+
+# ---------------------------------------------------------------------------
+# OCR math-fault repair and structural lint
+# ---------------------------------------------------------------------------
+
+# A braced atom with up to two levels of nesting, e.g. ``{ a _ { n } }``.
+_BRACED = r"\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\}"
+
+# MinerU sometimes reads ``\sqrt[k]{a_n}`` as ``\sqrt[{k}/{a_n}]``: the
+# radicand lands inside the root index and the mandatory argument goes
+# missing. Two variants occur in the wild:
+#   A) ``\sqrt [ {X} / {Y} ]``   – brackets closed, radicand missing
+#   B) ``\sqrt [ {X} / {Y} }``   – the closing ``]`` itself became ``}``
+_SQRT_FAULT_A_RE = re.compile(
+    r"\\sqrt[ \t]*\[[ \t]*(" + _BRACED + r")[ \t]*/[ \t]*(" + _BRACED + r")[ \t]*\](?![ \t]*\{)"
+)
+_SQRT_FAULT_B_RE = re.compile(
+    r"\\sqrt[ \t]*\[[ \t]*(" + _BRACED + r")[ \t]*/[ \t]*(" + _BRACED + r")[ \t]*\}"
+)
+
+
+def _line_of(text: str, offset: int) -> int:
+    return text.count("\n", 0, offset) + 1
+
+
+def repair_common_math_faults(text: str) -> tuple[str, list[str]]:
+    """Best-effort repair of known OCR math faults. Returns the repaired
+    text plus one human-readable note per repair (with 1-based line numbers
+    referring to the *input* text).
+    """
+    if not text or "\\sqrt" not in text:
+        return text, []
+    repairs: list[str] = []
+
+    def fix_variant_a(match: re.Match[str]) -> str:
+        line = _line_of(text, match.start())
+        repairs.append(
+            f"L{line}: moved '\\sqrt' radicand out of the root index "
+            f"({match.group(0).strip()} -> '\\sqrt[{match.group(1).strip()}]{{{match.group(2).strip()}}}')"
+        )
+        return f"\\sqrt[{match.group(1)}]{{{match.group(2)}}}"
+
+    def fix_variant_b(match: re.Match[str]) -> str:
+        line = _line_of(text, match.start())
+        repairs.append(
+            f"L{line}: repaired '\\sqrt' with unclosed root index "
+            f"({match.group(0).strip()} -> '\\sqrt[{match.group(1).strip()}]{{{match.group(2).strip()}}}')"
+        )
+        # The trailing '}' terminated the enclosing group in the source, so
+        # re-emit it to keep brace balance.
+        return f"\\sqrt[{match.group(1)}]{{{match.group(2)}}}}}"
+
+    # Variant A first: when both could match, A's explicit `]` is the more
+    # faithful reading of the OCR output.
+    repaired = _SQRT_FAULT_A_RE.sub(fix_variant_a, text)
+    repaired = _SQRT_FAULT_B_RE.sub(fix_variant_b, repaired)
+    return repaired, repairs
+
+
+def _count_unescaped(text: str, char: str) -> int:
+    return len(re.findall(rf"(?<!\\){re.escape(char)}", text))
+
+
+def validate_math_structure(text: str) -> list[tuple[int, str]]:
+    """Lint `text` for LaTeX math-structure problems that would fatal at
+    compile time. Returns ``(line, message)`` pairs (1-based lines).
+    """
+    issues: list[tuple[int, str]] = []
+    if not text:
+        return issues
+
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        if _count_unescaped(line, "$") % 2 == 1:
+            issues.append((line_no, "unbalanced '$' (odd number of unescaped '$' on the line)"))
+
+    for match in _MATH_REGION_RE.finditer(text):
+        segment = match.group(0)
+        depth = _count_unescaped(segment, "{") - _count_unescaped(segment, "}")
+        if depth != 0:
+            issues.append((
+                _line_of(text, match.start()),
+                f"unbalanced braces in math region (depth {depth:+d}): {segment[:60]!r}",
+            ))
+
+    for pattern, hint in (
+        (_SQRT_FAULT_A_RE, "\\sqrt root index contains '/' and the mandatory radicand is missing"),
+        (_SQRT_FAULT_B_RE, "\\sqrt root index is never closed with ']' and the radicand is missing"),
+    ):
+        for match in pattern.finditer(text):
+            issues.append((_line_of(text, match.start()), hint))
+
+    return issues
+
+
+def sanitize_and_repair(text: str) -> tuple[str, list[str]]:
+    """Combined pipeline hook: sanitize prose characters, then repair known
+    OCR math faults. Returns the new text and repair notes (empty when
+    nothing had to be fixed).
+
+    When `text` is a complete document, only the body between
+    \\begin{document} and \\end{document} is rewritten: the preamble may
+    contain \\newunicodechar{□}{...} declarations whose first argument must
+    stay a single literal character, so substituting it (e.g. to
+    ``$\\square$``) breaks the compile with "Invalid argument".
+    """
+    parts = _split_document(text)
+    if parts is None:
+        sanitized = sanitize_latex_body(text)
+        return repair_common_math_faults(sanitized)
+    head, body, tail = parts
+    body, repairs = repair_common_math_faults(sanitize_latex_body(body))
+    return head + body + tail, repairs

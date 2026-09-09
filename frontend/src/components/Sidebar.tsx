@@ -228,9 +228,10 @@ export function Sidebar({
         </button>
       </nav>
 
-      <div className="sidebar-divider" />
+      <div className="sidebar-scroll">
+        <div className="sidebar-divider" />
 
-      <div className="doc-list">
+        <div className="doc-list">
         {visible.length === 0 ? (
           <div className="muted small" style={{ padding: '12px' }}>
             {tab === 'favorites' ? '尚无收藏' : '暂无历史记录，点击「新解析」上传文件'}
@@ -392,7 +393,8 @@ export function Sidebar({
             )}
           </div>
         </>
-      )}
+        )}
+      </div>
 
       <div className="sidebar-divider" />
       <div className="account-card">
