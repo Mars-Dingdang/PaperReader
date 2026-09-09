@@ -51,6 +51,7 @@ def main():
     args = parser.parse_args()
     BASE = f'http://127.0.0.1:{args.port}'
     root = Path(__file__).resolve().parents[1]
+    version = json.loads((root / 'frontend' / 'package.json').read_text(encoding='utf-8'))['version']
     with tempfile.TemporaryDirectory(prefix='PaperReader smoke ') as temp:
         base = Path(temp) / '中文 portable path'
         base.mkdir()
@@ -93,7 +94,7 @@ def main():
                                        else f'Launcher exited: {process.returncode}')
                 try:
                     health = Client().json('/health')
-                    assert health['app'] == 'PaperReader' and health['version'] == '2.1.3'
+                    assert health['app'] == 'PaperReader' and health['version'] == version
                     return process
                 except (urllib.error.URLError, ConnectionError):
                     time.sleep(0.25)
@@ -167,6 +168,23 @@ def main():
             first.request('/api/auth/me', expected=401)
             first.json('/api/auth/login', {'username': 'smoke-owner', 'password': 'smoke-password'})
             assert first.json('/api/auth/me')['id'] == owner['id']
+            if args.archive and os.name == 'nt':
+                # v2.1.1 shipped with a healthy backend but a broken window:
+                # PAPERREADER_NO_WINDOW skipped webview entirely, so the .NET
+                # bridge never ran in CI. Initialize the packaged GUI stack
+                # explicitly so that class of regression fails here.
+                env['PAPERREADER_GUI_CHECK'] = '1'
+                env.pop('PAPERREADER_NO_WINDOW', None)
+                try:
+                    check = subprocess.run(command, cwd=base, env=env, timeout=180)
+                finally:
+                    env.pop('PAPERREADER_GUI_CHECK', None)
+                    env['PAPERREADER_NO_WINDOW'] = '1'
+                if check.returncode != 0:
+                    error_log = base / 'PaperReader-error.log'
+                    detail = error_log.read_text(encoding='utf-8') if error_log.exists() else ''
+                    raise AssertionError(f'Packaged GUI stack failed to initialize:\n{detail}')
+                print('PASS: packaged GUI stack initializes (pythonnet/.NET + WebView2 bindings)')
             print('PASS: frontend, PDF worker MIME, cookies, upload/read, user isolation, profile, chat persistence, restart, login/logout')
         finally:
             for process in processes:

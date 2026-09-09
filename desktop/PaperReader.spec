@@ -15,9 +15,15 @@ datas = [
     (str(project_root / "desktop" / "assets" / "PaperReader.ico"), "."),
 ]
 datas += collect_data_files("pypdfium2")
+# Conda Pythons keep the OpenSSL DLLs that _ssl/_hashlib link against in
+# Library\bin; PyInstaller does not collect them on its own. Globbed so both
+# OpenSSL 1.1 (libssl-1_1-x64.dll) and 3 (libssl-3-x64.dll) layouts work.
+conda_dll_names = {"libexpat.dll", "liblzma.dll", "libbz2.dll", "ffi.dll", "sqlite3.dll"}
+conda_dll_names |= {p.name for p in conda_bin.glob("libssl-*.dll")}
+conda_dll_names |= {p.name for p in conda_bin.glob("libcrypto-*.dll")}
 binaries = [
     (str(conda_bin / name), ".")
-    for name in ("libexpat.dll", "liblzma.dll", "libbz2.dll", "ffi.dll", "sqlite3.dll")
+    for name in sorted(conda_dll_names)
     if (conda_bin / name).is_file()
 ]
 

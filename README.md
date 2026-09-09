@@ -1,8 +1,8 @@
-# PaperReader v2.1.3
+# PaperReader v2.1.4
 
-[Download Windows / macOS v2.1.3](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.3) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.3.md)
+[Download Windows / macOS v2.1.4](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.4) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.4.md)
 
-v2.1.3 fixes translated-PDF compilation for pdfLaTeX source projects (including arXiv `2605.18309`): source compiler declarations apply only to the original document, translated documents compile with XeLaTeX, pdfLaTeX-only `\DeclareUnicodeCharacter` preambles are made XeLaTeX-compatible, and stale `latexmk` state can no longer mask the real compile error. Frontend/API package version: `2.1.3`.
+v2.1.4 makes the Windows application reliably startable and is the first officially supported Windows build: the desktop window stack is pinned to `pythonnet 3.0.5` / `clr-loader 0.2.7.post0` (pythonnet 3.1.0's runtime DLL cannot be initialized by the .NET Framework host inside the frozen EXE, so earlier v2.1.x Windows packages could fail before any window appeared), local builds pin `setuptools 65.5.0` to fix a packaged-startup crash, and the release smoke test now also initializes the packaged GUI stack. Windows users on any earlier v2.1.x build should switch to the v2.1.4 ZIP. Frontend/API package version: `2.1.4`.
 
 Windows users: extract the complete ZIP and run `PaperReader.exe`. Apple Silicon Mac users: open the DMG and copy PaperReader to Applications. Both builds show the provider setup wizard on first launch. TeX Live / `latexmk` and the selected TeX engine are still required for translated PDF generation; projects without a declaration use XeLaTeX by default. See the [Windows guide](desktop/README_zh.md) and [macOS guide](desktop/README_macos_zh.md).
 

@@ -1,5 +1,13 @@
 # Upgrading PaperReader
 
+## Upgrading from v2.1.3 to v2.1.4
+
+PaperReader v2.1.4 is a backward-compatible patch release and requires no data migration. Keep the existing `DATA_DIR`, `SQLITE_DB_NAME`, `AUTH_SECRET_KEY`, account database, and user settings.
+
+v2.1.4 is the first Windows package verified to start. Earlier v2.1.x Windows ZIPs could fail before any window appeared: the build environment resolved the unpinned `pythonnet` to 3.1.0, whose `Python.Runtime.dll` the .NET Framework host cannot initialize inside a PyInstaller-frozen app (`Failed to resolve Python.Runtime.Loader.Initialize` in `PaperReader-error.log`), while the release smoke test only exercised the windowless backend (`PAPERREADER_NO_WINDOW=1`). The build now pins `pythonnet 3.0.5` + `clr-loader 0.2.7.post0`, pins `setuptools 65.5.0` for Windows builds (setuptools 80.x vendors a `jaraco.context` whose `backports.tarfile` import crashes the packaged `pkg_resources` runtime hook on Python 3.11), stops a still-running portable app and retries ZIP packaging in `build_portable.ps1` (fixing `Compress-Archive` failures on files locked by another process), saves the PowerShell packaging scripts as UTF-8 with BOM (so `使用说明.txt` and the shortcut description are no longer mojibake on Chinese-locale Windows PowerShell), and smoke-tests the packaged GUI stack via `PAPERREADER_GUI_CHECK=1`. Windows users on any earlier v2.1.x build should download the v2.1.4 ZIP; macOS behavior is unchanged.
+
+Frontend, package-lock root metadata, API, release smoke checks, and release notes are synchronized to `2.1.4`; the Git tag is `v2.1.4`.
+
 ## Upgrading from v2.1.2 to v2.1.3
 
 PaperReader v2.1.3 is a backward-compatible patch release and requires no data migration. Keep the existing `DATA_DIR`, `SQLITE_DB_NAME`, `AUTH_SECRET_KEY`, account database, and user settings.

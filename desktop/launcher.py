@@ -138,6 +138,17 @@ def main() -> None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
     app_root = _prepare_environment()
 
+    if os.environ.get("PAPERREADER_GUI_CHECK") == "1":
+        # Self-check for packaged builds: verify the native GUI stack
+        # (pythonnet/.NET + WebView2 bindings) initializes without opening a
+        # window. Used by scripts/smoke_release.py so that a broken frozen
+        # window stack cannot pass the release check.
+        import importlib
+
+        guilib = importlib.import_module("webview.guilib")
+        guilib.initialize()
+        return
+
     import uvicorn
     from app.main import app
 

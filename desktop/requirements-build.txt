@@ -2,3 +2,14 @@
 pyinstaller==6.11.1; sys_platform == "win32"
 pywebview==6.2.1
 py2app==0.28.10; sys_platform == "darwin"
+# pythonnet 3.1.0 ships a Python.Runtime.dll that the .NET Framework host
+# cannot initialize inside PyInstaller-frozen apps, so the window never opens
+# ("Failed to resolve Python.Runtime.Loader.Initialize"). Keep the
+# netfx-compatible pair that is known to work frozen.
+pythonnet==3.0.5; sys_platform == "win32"
+clr-loader==0.2.7.post0; sys_platform == "win32"
+# setuptools 80.x vendors jaraco.context, whose "from backports import
+# tarfile" on Python 3.11 is missing from the frozen graph and crashes the
+# pkg_resources runtime hook at EXE startup. 65.5.0 (what CI's setup-python
+# provides) ships a self-contained pkg_resources.
+setuptools==65.5.0; sys_platform == "win32"

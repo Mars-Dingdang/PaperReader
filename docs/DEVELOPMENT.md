@@ -1,17 +1,18 @@
-# PaperReader 开发者文档：macOS 本地构建与 Release 发布
+# PaperReader 开发者文档：Windows / macOS 本地构建与 Release 发布
 
-本文档面向需要在 **macOS 本地从源代码运行、构建 PaperReader 原生应用**，以及维护 GitHub Release 的开发者。
+本文档面向需要在 **Windows 或 macOS 本地从源代码运行、构建 PaperReader 原生应用**，以及维护 GitHub Release 的开发者。Windows 部分的命令行均以 **Git Bash**（Git for Windows 自带）为准。
 
 PaperReader 当前桌面端不是 Electron/Tauri，而是以下组合：
 
 - 前端：React + TypeScript + Vite
 - 后端：FastAPI + Uvicorn
-- 原生窗口：pywebview（macOS 使用 WKWebView）
+- 原生窗口：pywebview（macOS 使用 WKWebView，Windows 使用 WebView2）
 - macOS 打包：py2app
-- 分发格式：`.app` + `.dmg`
+- Windows 打包：PyInstaller
+- 分发格式：macOS 为 `.app` + `.dmg`；Windows 为可移植版 ZIP
 - CI / Release：GitHub Actions
 
-当前 macOS 包只面向 **Apple Silicon (`arm64`)**，最低系统版本为 **macOS 13**。
+当前 macOS 包只面向 **Apple Silicon (`arm64`)**，最低系统版本为 **macOS 13**。当前 Windows 包只面向 **x64**，最低系统为 **Windows 10 64 位**（需 WebView2 Runtime）。
 
 ---
 
@@ -67,6 +68,18 @@ PaperReader 桌面启动器会自动检测：
 /Library/TeX/texbin/latexmk
 ```
 
+### Windows（Git Bash）构建环境
+
+- Windows 10/11 64 位（x64）
+- Git for Windows（提供 Git Bash）
+- Python **3.11**（x64 版本，安装时勾选 "Add python.exe to PATH"）
+- Node.js **20**
+- npm
+- Microsoft WebView2 Runtime（大多数 Windows 10/11 已内置）
+- 可选：TeX Live（只有生成译文 PDF 时需要）
+
+> `desktop/build_portable.ps1` 使用 PyInstaller 按 Python 3.11 / x64 构建，与 CI 的 Windows job 一致。Windows 本地构建的完整步骤见下文「在 Windows 上本地构建可移植版（Git Bash）」一节。
+
 ---
 
 ## 2. 获取源代码
@@ -110,6 +123,13 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 ```
 
+Windows Git Bash 下没有 `python3.11` 命令，且 venv 的激活脚本位于 `Scripts` 目录（不是 macOS/Linux 的 `bin`）：
+
+```bash
+python -m venv .venv
+source .venv/Scripts/activate
+```
+
 然后安装 Python 构建依赖：
 
 ```bash
@@ -122,6 +142,8 @@ python -m pip install -r desktop/requirements-build.txt
 - 后端运行依赖
 - `pywebview`
 - macOS 下的 `py2app`
+- Windows 下的 `pyinstaller`，以及固定的 `pythonnet 3.0.5` / `clr-loader 0.2.7.post0`（pythonnet 3.1.0 的 `Python.Runtime.dll` 无法在 PyInstaller 冻结环境中由 .NET Framework 宿主初始化，窗口打不开，`PaperReader-error.log` 中会出现 `Failed to resolve Python.Runtime.Loader.Initialize`）
+- Windows 下的 `setuptools` 固定 `65.5.0`（80.x 的 vendored `jaraco.context` 在 Python 3.11 冻结打包时缺少 `backports.tarfile`，EXE 一启动就崩溃）
 
 ---
 
@@ -225,6 +247,8 @@ python -m pip install -r requirements.txt
 
 根据需要填写 `.env` 中的开发配置。
 
+> Windows Git Bash 通常没有 `make`，直接使用下方各自的等价命令即可；`cp .env.example .env` 在 Git Bash 中同样可用。
+
 终端 1：启动 FastAPI：
 
 ```bash
@@ -323,9 +347,133 @@ open release/PaperReader-v2.1.2-macOS-arm64.dmg
 
 ---
 
-## 8. 构建后校验
+# 8. 在 Windows 上本地构建可移植版（Git Bash）
 
-### 8.1 检查签名
+Windows 版 PaperReader 不是安装器，而是 PyInstaller 打包的 **可移植版**：解压 ZIP 后直接运行 `PaperReader.exe`，最终用户不需要安装 Python 或 Node.js。
+
+以下命令全部在 **Git Bash**（Git for Windows 自带）中执行。
+
+## 8.1 从源码直接打开原生 Windows 应用
+
+调试完整桌面形态时，先构建前端，再运行与 macOS 相同的桌面启动器：
+
+```bash
+npm --prefix frontend run build
+python desktop/launcher.py
+```
+
+启动器会：
+
+1. 准备 PaperReader 的本地配置和数据目录；
+2. 在 `127.0.0.1:8000` 启动内嵌 FastAPI/Uvicorn 服务；
+3. 使用 pywebview 创建原生 Windows 窗口（WebView2 / EdgeChromium）；
+4. 显示 `frontend/dist` 中的前端；
+5. 关闭窗口后停止内嵌后端。
+
+应用数据默认位于：
+
+```text
+%LOCALAPPDATA%\PaperReader\
+```
+
+Git Bash 中即 `~/AppData/Local/PaperReader/`，其中包括配置、数据库、WebView 状态以及运行时数据。启动异常时检查：
+
+```text
+%LOCALAPPDATA%\PaperReader\PaperReader-error.log
+```
+
+### 端口 8000 被占用
+
+```bash
+netstat -ano | grep :8000 | grep LISTENING
+```
+
+输出最后一列是 PID。确认是旧 PaperReader/uvicorn 进程后结束它（Git Bash 中 `taskkill` 的参数斜杠要写成 `//`，避免被 MSYS 转换成路径）：
+
+```bash
+taskkill //PID <PID> //F
+```
+
+然后重新运行 `python desktop/launcher.py`。
+
+> 原生 source-run 模式读取的是已经构建好的 `frontend/dist`。修改前端后，需要重新执行 `npm --prefix frontend run build` 才会进入原生窗口。
+
+## 8.2 构建可移植版 ZIP
+
+安装构建依赖（`desktop/requirements-build.txt` 通过 `sys_platform` 在 Windows 下安装 PyInstaller）：
+
+```bash
+python -m pip install -r desktop/requirements-build.txt
+```
+
+构建脚本是 PowerShell 脚本，从 Git Bash 直接调用 `powershell.exe` 执行：
+
+```bash
+powershell -ExecutionPolicy Bypass -File ./desktop/build_portable.ps1
+```
+
+如果 `python` 或 `npm` 不在 PATH，可显式指定路径：
+
+```bash
+powershell -ExecutionPolicy Bypass -File ./desktop/build_portable.ps1 \
+  -PythonPath "C:/Python311/python.exe" \
+  -NpmPath "C:/Program Files/nodejs/npm.cmd"
+```
+
+脚本会依次执行：
+
+1. `npm ci`
+2. `npm run build`
+3. 使用 PyInstaller（`desktop/PaperReader.spec`）打包 `PaperReader.exe`
+4. 把 `desktop/README_zh.md` 复制为包内 `使用说明.txt`，并放入 `create_shortcut.ps1`
+5. 压缩为 ZIP 并生成 SHA-256 文件
+
+应用版本同样来自 `frontend/package.json -> version`。例如版本为 `2.1.2` 时，主要输出为：
+
+```text
+dist/PaperReader/PaperReader.exe
+release/PaperReader-v2.1.2-Windows-x64.zip
+release/PaperReader-v2.1.2-Windows-x64.zip.sha256
+```
+
+直接运行打包出的 EXE：
+
+```bash
+./dist/PaperReader/PaperReader.exe
+```
+
+> 脚本内部会自行执行 `npm ci` 和 `npm run build`，因此打包前不需要单独构建前端。
+
+## 8.3 构建后校验
+
+与 CI 的 Windows job 一致的 smoke test：
+
+```bash
+python scripts/smoke_release.py --web
+python scripts/smoke_release.py --archive release/PaperReader-v2.1.2-Windows-x64.zip
+```
+
+校验 ZIP 的 SHA-256（Git Bash 自带 `sha256sum`）：
+
+```bash
+sha256sum release/PaperReader-v*-Windows-x64.zip
+cat release/PaperReader-v*-Windows-x64.zip.sha256
+```
+
+比较两处输出的 SHA-256 digest 是否一致。
+
+后端测试与 Python 语法检查与 macOS 相同：
+
+```bash
+python -m pytest backend/tests -q
+python -m compileall -q backend/app desktop/launcher.py
+```
+
+---
+
+## 9. macOS 构建后校验
+
+### 9.1 检查签名
 
 ```bash
 codesign --verify --deep --strict --verbose=2 dist/PaperReader.app
@@ -345,7 +493,7 @@ codesign --force --deep --sign - dist/PaperReader.app
 2. Control-click / 右键；
 3. 选择“打开”。
 
-### 8.2 运行仓库自带 smoke test
+### 9.2 运行仓库自带 smoke test
 
 GitHub Actions 对正式 macOS 构建执行的是：
 
@@ -359,19 +507,19 @@ python scripts/smoke_release.py --app dist/PaperReader.app
 python scripts/smoke_release.py --app dist/PaperReader.app
 ```
 
-### 8.3 后端测试
+### 9.3 后端测试
 
 ```bash
 python -m pytest backend/tests -q
 ```
 
-### 8.4 Python 语法检查
+### 9.4 Python 语法检查
 
 ```bash
 python -m compileall -q backend/app desktop/launcher.py
 ```
 
-### 8.5 前端生产构建
+### 9.5 前端生产构建
 
 ```bash
 npm --prefix frontend run build
@@ -379,7 +527,7 @@ npm --prefix frontend run build
 
 ---
 
-## 9. 校验 DMG SHA-256
+## 10. 校验 DMG SHA-256
 
 构建后可执行：
 
@@ -395,7 +543,7 @@ cat "$DMG.sha256"
 
 ---
 
-# 10. GitHub Actions 当前 Release 流程
+# 11. GitHub Actions 当前 Release 流程
 
 仓库已经配置：
 
@@ -424,9 +572,9 @@ v2.*
 
 ---
 
-# 11. 发布一个新的 Release
+# 12. 发布一个新的 Release
 
-## 11.1 版本号 / Tag 约定
+## 12.1 版本号 / Tag 约定
 
 workflow 要求 Git tag 与 `frontend/package.json` 的完整 SemVer 严格一致：
 
@@ -447,7 +595,7 @@ Release notes:         docs/releases/v2.1.2.md
 
 ---
 
-## 11.2 示例：发布 v2.1.2
+## 12.2 示例：发布 v2.1.2
 
 假设准备发布：
 
@@ -515,6 +663,14 @@ npm --prefix frontend run build
 python scripts/smoke_release.py --app dist/PaperReader.app
 ```
 
+如果本机是 Windows，建议额外执行（Git Bash）：
+
+```bash
+powershell -ExecutionPolicy Bypass -File ./desktop/build_portable.ps1
+python scripts/smoke_release.py --web
+python scripts/smoke_release.py --archive release/PaperReader-v*-Windows-x64.zip
+```
+
 ### Step 4：提交 Release 准备变更
 
 ```bash
@@ -541,7 +697,7 @@ GitHub Actions 随后会自动构建并发布 Release。
 
 ---
 
-# 12. 使用 GitHub CLI 查看发布状态
+# 13. 使用 GitHub CLI 查看发布状态
 
 如果安装了 `gh`：
 
@@ -581,7 +737,7 @@ gh release view v2.1.2 --json assets
 
 ---
 
-# 13. 手动发布 Release（仅故障恢复时使用）
+# 14. 手动发布 Release（仅故障恢复时使用）
 
 正常情况应让 `.github/workflows/release.yml` 自动发布，因为它会保证 Windows/macOS 都经过对应 smoke test。
 
@@ -600,7 +756,7 @@ gh release create v2.1.2 \
 
 ---
 
-# 14. Release 失败时如何处理
+# 15. Release 失败时如何处理
 
 ## 测试或打包 job 失败
 
@@ -622,7 +778,7 @@ gh release create v2.1.2 \
 
 ---
 
-# 15. 常见问题
+# 16. 常见问题
 
 ## `npm ci` 失败
 
@@ -676,6 +832,21 @@ tail -120 build/macos-py2app.log
 lsof -nP -iTCP:8000 -sTCP:LISTEN
 ```
 
+## Windows 打包版无法启动或窗口空白
+
+确认已安装 Microsoft WebView2 Runtime（大多数 Windows 10/11 已内置）。启动失败详情见：
+
+```text
+%LOCALAPPDATA%\PaperReader\PaperReader-error.log
+```
+
+以及端口占用（Git Bash）：
+
+```bash
+netstat -ano | grep :8000 | grep LISTENING
+taskkill //PID <PID> //F
+```
+
 ## 可以打开 APP，但不能生成译文 PDF
 
 检查 `latexmk`：
@@ -703,7 +874,7 @@ lsof -nP -iTCP:8000 -sTCP:LISTEN
 
 ---
 
-# 16. 清理本地构建产物
+# 17. 清理本地构建产物
 
 如果需要重新做一次干净构建：
 
@@ -723,11 +894,17 @@ rm -rf release
 ./desktop/build_macos.sh
 ```
 
+Windows Git Bash 中同样使用上述 `rm -rf` 命令清理，然后重新执行：
+
+```bash
+powershell -ExecutionPolicy Bypass -File ./desktop/build_portable.ps1
+```
+
 ---
 
-# 17. 最短命令速查
+# 18. 最短命令速查
 
-## 本地直接从源码打开原生 APP
+## 本地直接从源码打开原生 APP（macOS）
 
 ```bash
 git clone https://github.com/Mars-Dingdang/PaperReader.git
@@ -748,6 +925,30 @@ python desktop/launcher.py
 conda activate paperreader-dev
 ./desktop/build_macos.sh
 open dist/PaperReader.app
+```
+
+## 本地直接从源码打开原生 APP（Windows Git Bash）
+
+```bash
+git clone https://github.com/Mars-Dingdang/PaperReader.git
+cd PaperReader
+
+python -m venv .venv
+source .venv/Scripts/activate
+
+python -m pip install -r desktop/requirements-build.txt
+npm --prefix frontend ci
+npm --prefix frontend run build
+python desktop/launcher.py
+```
+
+## 构建 Windows 可移植版 ZIP（Git Bash）
+
+```bash
+source .venv/Scripts/activate
+python -m pip install -r desktop/requirements-build.txt
+powershell -ExecutionPolicy Bypass -File ./desktop/build_portable.ps1
+./dist/PaperReader/PaperReader.exe
 ```
 
 ## 发布下一个 SemVer Release（以 v2.1.2 为例）

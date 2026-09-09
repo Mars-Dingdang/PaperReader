@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$NpmPath = "",
     [string]$PythonPath = ""
 )
@@ -7,6 +7,12 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Version = (Get-Content (Join-Path $ProjectRoot "frontend\package.json") -Raw | ConvertFrom-Json).version
+
+# A portable app still running from a previous build keeps files in
+# dist\PaperReader locked, which breaks both PyInstaller COLLECT and
+# Compress-Archive ("...正由另一进程使用").
+Get-Process -Name "PaperReader" -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 500
 
 if (-not $NpmPath) {
     $NpmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
@@ -50,10 +56,21 @@ Copy-Item -LiteralPath (Join-Path $ProjectRoot "desktop\create_shortcut.ps1") -D
 $ReleaseDir = Join-Path $ProjectRoot "release"
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 $ZipPath = Join-Path $ReleaseDir "PaperReader-v$Version-Windows-x64.zip"
-if (Test-Path -LiteralPath $ZipPath) {
-    Remove-Item -LiteralPath $ZipPath -Force
+for ($Attempt = 1; $Attempt -le 3; $Attempt++) {
+    try {
+        if (Test-Path -LiteralPath $ZipPath) {
+            Remove-Item -LiteralPath $ZipPath -Force
+        }
+        Compress-Archive -Path (Join-Path $PortableDir "*") -DestinationPath $ZipPath -CompressionLevel Optimal
+        break
+    }
+    catch {
+        if ($Attempt -ge 3) { throw }
+        # Freshly written EXEs/DLLs can be held briefly by antivirus or the
+        # shell; give the handle a moment to clear and try again.
+        Start-Sleep -Seconds 5
+    }
 }
-Compress-Archive -Path (Join-Path $PortableDir "*") -DestinationPath $ZipPath -CompressionLevel Optimal
 $Hash = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash.ToLower()
 "$Hash  $([IO.Path]::GetFileName($ZipPath))" | Set-Content -Encoding ascii -Path "$ZipPath.sha256"
 Write-Host "Portable package: $ZipPath"
