@@ -974,3 +974,271 @@ git push origin v2.1.2
 ```
 
 之后由 GitHub Actions 自动生成 Windows x64 和 macOS arm64 构建并发布 GitHub Release。
+
+---
+
+# 19. 全栈 Web 开发参考
+
+以下内容自 README 移入，面向直接运行后端 + 前端（或 Docker 部署）的开发与联调场景；桌面端构建与发布见上文第 1–18 节。
+
+## 19.1 项目结构
+
+```text
+PaperReader/
+├── backend/
+│   └── app/
+│       ├── api/            # routes_*.py：auth / setup / upload / document / chat / project / review / recompile / data
+│       ├── core/           # config.py、database.py
+│       ├── models/         # schemas.py、store.py
+│       ├── services/       # document_pipeline、translate_service、alignment_service、llm_client、
+│       │                   # mineru_service、mineru_layout、latex_service、latex_sanitizer、latex_recovery、
+│       │                   # project_archive、vision_check_service、auth_service、chat_store、
+│       │                   # legacy_import、literature_service、stage_tracker
+│       ├── workers/        # tasks.py（Celery）
+│       └── main.py
+├── desktop/                # 桌面端启动器与打包脚本（见第 1–18 节）
+├── frontend/
+│   ├── src/
+│   │   ├── components/     # ReaderPage 使用的 UI 组件
+│   │   ├── lib/            # api.ts、pdfDocumentOptions.ts
+│   │   ├── pages/          # ReaderPage.tsx
+│   │   ├── App.tsx
+│   │   ├── main.tsx
+│   │   └── styles.css
+│   ├── index.html
+│   ├── package.json
+│   └── vite.config.ts
+├── data/                   # 运行时数据（uploads / outputs / paperreader.db），不要提交
+├── docs/                   # 用户说明书、开发者文档、release notes
+├── infra/                  # Dockerfile.backend
+├── scripts/                # setup_*.sh / .ps1、smoke_release.py、benchmark_llm_rate.py
+├── .env.example
+├── docker-compose.yml
+├── Makefile
+└── requirements.txt
+```
+
+## 19.2 Python 依赖
+
+来自 `requirements.txt`：
+
+- fastapi==0.115.0
+- uvicorn[standard]==0.30.6
+- python-multipart==0.0.9
+- pydantic==2.9.2
+- pydantic-settings==2.5.2
+- openai==1.51.2
+- requests==2.32.3
+- celery==5.4.0
+- redis==5.0.8
+- httpx==0.27.2
+- pytest==8.3.3
+- pypdf==4.3.1
+- pypdfium2==4.30.0
+- Pillow==10.4.0
+
+## 19.3 环境变量
+
+复制环境文件并填写 OpenAI 兼容端点与密钥：
+
+```bash
+cp .env.example .env
+```
+
+### 必需变量
+
+- `OPENAI_API_KEY`
+- `OPENAI_BASE_URL`
+- `OPENAI_MODEL`
+- `MINERU_API_KEY`（在 https://mineru.net/apiManage/docs 申请）
+- `AUTH_SECRET_KEY` — 账号模式下的本地会话签名/加密密钥
+
+### 可选 / 调优变量
+
+- `SQLITE_DB_NAME`（默认 `paperreader.db`）— `DATA_DIR` 下的本地持久化数据库文件。
+- `SESSION_DAYS`（默认 `1`）— 普通登录会话有效期。
+- `REMEMBER_ME_DAYS`（默认 `30`）— "记住我"会话有效期。
+- `TRANSLATE_CONCURRENCY`（默认 `4`）— 并行翻译的 chunk 数。
+- `TRANSLATE_MAX_RETRIES`（默认 `5`）— 单次 LLM 调用的重试预算；使用带抖动的指数退避，并遵守 `Retry-After`。
+- `LLM_RATE_LIMIT_RPS`（默认 `4`）— 所有 worker 线程共享的 LLM 全局限速（每秒请求数，令牌桶）。设为 `0` 关闭。建议低于服务商/密钥公布的 RPM 以避免 429。注意：该限速按单个 uvicorn 进程生效；若扩展为 N 个 worker，实际限速为 `N × LLM_RATE_LIMIT_RPS`。
+- `TRANSLATE_BATCH_MAX_CHARS`（默认 `6000`）— 每个 IR 批量请求拼接字符数上限。调大可摊薄往返延迟，但单次请求体更大。
+- `TRANSLATE_SEGMENT_MAX_CHARS`（默认 `2000`）— 单个散文本段落的硬上限。超长 MinerU 段落会被拆分再重组，避免模型输出上限截断后半段。
+- `VISION_MODEL`（默认 `GLM-4.5V`）— Phase D 视觉校验使用的多模态模型，必须与 `OPENAI_BASE_URL` 同一 OpenAI 兼容端点且支持视觉（如 `GLM-4.5V`、`GLM-4.6V`、`Qwen3-VL-30B-A3B-Instruct`、`Qwen3-VL-235B-A22B-Instruct`）。
+- `VISION_CHECK_ENABLED`（默认 `false`）、`VISION_CHECK_MODE`（`auto` | `manual`）、`VISION_CHECK_MAX_PAGES`（默认 `8`）— Phase D 的部署默认值。新账号默认关闭校验，可在侧边栏或个人中心开启自动/手动校验。
+- `LATEXMK_PATH` — 当 `latexmk` 不在 `PATH` 上时，指向其绝对路径。
+
+### MinerU PDF 解析
+
+PDF 解析走 MinerU 精准解析 API（无需本地 OCR / GPU / 大模型下载）。除 API Key 外均可选：
+
+- `MINERU_API_KEY` — MinerU 账号的 Bearer token。
+- `MINERU_BASE_URL` — 默认 `https://mineru.net/api/v4`。
+- `MINERU_MODEL_VERSION` — `vlm`（推荐）、`pipeline` 或 `MinerU-HTML`。
+- `MINERU_LANGUAGE` — 英文论文 `en`，中文 `ch` 等。
+- `MINERU_ENABLE_FORMULA`、`MINERU_ENABLE_TABLE`、`MINERU_IS_OCR` — 功能开关。
+- `MINERU_POLL_INTERVAL`（秒）、`MINERU_TIMEOUT`（秒）— 轮询控制。
+
+MinerU 侧限制：文件 ≤ 200 MB，≤ 200 页，每账号每天 1000 高优先级页。需允许访问 `mineru.net` 及其返回的 OSS/CDN 域名。
+
+## 19.4 本地运行
+
+Web 开发模式（前端热更新，`make backend` / `make frontend`）已在上文第 6 节说明，此处只补充其余命令。
+
+启动可选的 Celery worker（用于后续异步任务扩展，请在独立终端运行）：
+
+```bash
+make worker
+# 等价：cd backend && celery -A app.workers.tasks worker -l info
+```
+
+前端构建与预览：
+
+```bash
+npm --prefix frontend run build      # 产出 frontend/dist
+npm --prefix frontend run preview    # 本地预览生产构建
+```
+
+常用校验：
+
+```bash
+pytest                               # 运行后端测试
+python -m compileall backend/app     # 快速语法检查
+```
+
+> 上传与解析在请求链路中是同步执行的；处理较大 PDF 时前端会持续轮询 `GET /api/document/{id}` 直至 `status` 变为 `done` 或 `failed`。
+
+## 19.5 账号系统
+
+- 上传、项目、历史、对话、视觉校验与重新编译等 API 均需登录。
+- 登录使用用户名 + 密码，凭据为 HttpOnly 会话 Cookie。
+- "记住我"仅延长 Cookie 有效期，不会明文存储密码。
+- 用户数据持久化在本地 SQLite：`users`、`sessions`、`user_settings`、`documents`、`projects`。
+- 按用户隔离的设置包括：主题、视觉校验偏好、收藏、个人 LLM `API Key` / `Base URL` / `Model`、个人 parser / MinerU 密钥与选项、视觉模型。
+
+### 个人中心
+
+登录后点击侧边栏账号区域进入个人中心，可以：
+
+- 上传/更换头像
+- 修改用户名
+- 修改密码
+- 配置个人 LLM 设置
+- 管理持久化的阅读偏好
+
+对话默认使用当前用户保存的 LLM 设置；为空时回退到后端 `.env` 默认值。
+
+## 19.6 Docker 部署
+
+```bash
+docker compose up --build
+```
+
+服务地址：
+
+- Frontend: `http://localhost:5173`
+- Backend: `http://localhost:8000`
+- Redis: `localhost:6379`
+
+## 19.7 API 端点
+
+- `GET /health`
+- **认证 / 设置（routes_auth.py）**
+  - `POST /api/auth/register`
+  - `POST /api/auth/login`
+  - `POST /api/auth/logout`
+  - `GET /api/auth/me`
+  - `PATCH /api/auth/profile`
+  - `POST /api/auth/change-password`
+  - `POST /api/auth/avatar`
+  - `PUT /api/settings/me`
+  - `PUT /api/settings/me/providers`
+- **首次运行向导（routes_setup.py）**
+  - `GET /api/setup/status`
+  - `PUT /api/setup`
+- **上传**
+  - `POST /api/upload`（multipart 文件：`.pdf` 或 `.tex`；表单字段 `vision_check_enabled`、`vision_check_mode`）
+- **文档**
+  - `GET /api/documents` — 列出当前登录用户的文档摘要
+  - `GET /api/document/{document_id}`
+  - `PATCH /api/document/{document_id}`
+  - `DELETE /api/document/{document_id}` — 软删除当前用户的一条历史记录
+  - `POST /api/document/{document_id}/retry` — 重新排队失败文档，从最近校验点续跑
+  - `GET /api/document/{document_id}/locate-counterpart`
+- **项目（TeX 工程）**
+  - `POST /api/project` — 创建 TeX 项目
+  - `GET /api/project/{project_id}` — 查看文件与主文件候选
+  - `POST /api/project/{project_id}/files` — 多次上传项目文件
+  - `POST /api/project/{project_id}/archive` — 安全导入 `.zip`、`.tar`、`.tar.gz` 或 `.tgz` LaTeX 工程包
+  - `POST /api/project/{project_id}/delete-files`
+  - `POST /api/project/{project_id}/build` — 选定主 `.tex` 后启动编译流水线
+  - `DELETE /api/project/{project_id}`
+- **视觉校验（Phase D）**
+  - `GET /api/document/{document_id}/review`
+  - `POST /api/document/{document_id}/review` — 接受 / 拒绝视觉模型提出的修订
+- **手动 TeX 重新编译**
+  - `GET /api/document/{document_id}/tex` — 读取当前 `translated.tex`
+  - `POST /api/document/{document_id}/tex` — 保存修改后重新编译（源文件先经 `latex_sanitizer` 清洗，并启用 strict→`-f` 降级编译）
+  - `POST /api/document/{document_id}/tex/reveal` — 在系统文件管理器中显示产物
+- **对话**
+  - `POST /api/chat`
+  - `POST /api/chat/sessions`
+  - `GET /api/chat/sessions`
+  - `GET /api/chat/sessions/{session_id}`
+- **产物访问**
+  - `GET|HEAD /data/{file_path}` — 产物文件下载，按账号校验归属
+
+### `GET /api/document/{document_id}` 响应要点
+
+- `source_filename`
+- `updated_at`、`last_opened_at`
+- `artifacts`（上传与生成的文件）
+- `references`（提取的参考文献条目，用于预览）
+- `progress`、`current_stage`、`current_stage_label`、`eta_seconds`、`stages`（Phase A）
+- `pending_reviews` — `manual` 模式下等待人工决策的视觉模型修订提案（Phase D）
+- `last_compile_warning` — strict 编译失败但宽松 `-f` 编译仍产出 PDF 时设置；UI 会提示用户打开手动 TeX 编辑器清理
+- 以及既有的 `status`、`original_pdf_url`、`translated_pdf_url`、`logs`
+
+### 对话请求体
+
+```json
+{
+  "document_id": "uuid",
+  "message": "What is the main contribution?",
+  "override_api_key": "",
+  "override_base_url": "",
+  "override_model": ""
+}
+```
+
+`override_*` 字段可选。当前 UI 中，对话通常直接使用登录用户保存的个人设置。
+
+### LaTeX 归档安全
+
+项目压缩包按文件名与内容双重识别后本地解压。导入最多允许 2,000 个成员、单文件 20 MB、整包 200 MB。绝对路径、`..` 穿越路径、链接、设备条目、加密 ZIP 成员、重复/冲突路径、损坏压缩包以及不含 `.tex` 的压缩包都会被原子性拒绝。导入后 UI 展示按置信度排序的主文件候选，等待用户确认后才会开始解析或翻译。
+
+## 19.8 平台说明
+
+### macOS (Apple Silicon)
+
+- PDF 解析经 MinerU 云端完成，无需本地 Torch/MPS 配置。
+- PDF 内的 HTTP(S) 链接在系统浏览器打开；PaperReader 窗口保留当前论文与阅读位置。
+- WKWebView 阅读器支持 PDF 文本选择/复制、生成的大纲与更快的触控板捏合缩放。
+- LaTeX 编译失败时，安装 TeX Live + `latexmk` 及中文字体。
+
+### Linux (CUDA)
+
+- PDF 解析无需 GPU（MinerU 云端）。
+- LLM 翻译仍使用 `.env` 中配置的 OpenAI 兼容端点。
+
+### Windows
+
+- 使用 `scripts/setup_windows.ps1`。
+- 安装 TeX Live + `latexmk`，并确保可执行文件在 `PATH` 中。
+
+## 19.9 当前实现边界
+
+- 上传处理仍在请求链路中同步执行（尚未引入后台任务交接）；文档内的翻译 chunk 通过线程池并发。
+- 文档/项目/账号状态持久化在 SQLite，但应用目前面向本地/小规模部署设计，而非加固的互联网级多租户服务。
+- 参考文献提取是启发式的（基于章节/行模式），不是完整的引文解析器。
+- 前端支持登录/注册、个人中心、面板开关、拖拽产物预览、视觉校验人工复核以及浏览器内 `translated.tex` 编辑器。
+- LaTeX 编译先跑 strict 一遍，再跑宽松的 `-f` 一遍，使流水线极少以硬失败告终；警告通过 `last_compile_warning` 上报，手动编辑器支持就地修补源码并重新编译。

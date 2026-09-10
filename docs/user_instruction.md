@@ -48,3 +48,22 @@ PaperReader 是一款保留 LaTeX 公式、图片等结构的论文翻译器。�
 左侧栏的“历史记录”中会显示用户提交的论文列表，点击即可查看解析结果和翻译结果。
 
 可以点击☆收藏论文，收藏的论文会在“我的收藏”中显示。
+
+### 产物文件
+左侧栏下滑可以看到“产物文件”，包含了原始文件，解析文件，翻译结果 LaTeX 和产物 PDF 等。其中的 translated.tex 点击“铅笔”按钮可以手动编辑后重新编译，也可以选择在本地 VSCode 中打开。
+
+文件储存的位置为：
+- Windows：
+```text
+ C:\Users\<name>\AppData\Local\PaperReader\data\outputs\<c312aa80-ff07-4122-ab89-17fbc22c0e5c>
+```
+- MacOS:
+```text
+/Users/<name>/Library/Application Support/PaperReader/data/outputs/<c312aa80-ff07-4122-ab89-17fbc22c0e5c>
+```
+其路径均可以从日志中找到。
+
+### AI 对话
+点击左侧边栏顶部三个按钮中靠左的一个，是 AI 对话功能。用户可以在对话框中输入问题，PaperReader 会根据用户上传的论文内容进行回答。
+
+上方的 AI Literature Chat 是一个独立的对话窗口，用户可以在其中将多篇上传的论文对比，进行问答。
