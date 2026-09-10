@@ -48,6 +48,12 @@ Hello world.
     translated_compiler_kwargs: list[dict] = []
 
     def fake_compile_translated(tex_path: Path, output_dir: Path, **kwargs) -> LatexCompileResult:
+        registered = output_root / record.document_id / "translated.tex"
+        assert registered.is_file()
+        assert any(
+            artifact.kind == "translated_tex" and Path(artifact.path) == registered
+            for artifact in record.artifacts
+        )
         translated_compiler_kwargs.append(kwargs)
         return LatexCompileResult(fake_compile_tex_project(tex_path, output_dir))
 

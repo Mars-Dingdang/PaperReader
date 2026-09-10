@@ -125,7 +125,29 @@ def _parse_bbox(value: object) -> tuple[float, float, float, float] | None:
     return x0, y0, x1, y1
 
 
-def _runs_from_paragraph_content(items: Iterable) -> list[Run]:
+def _has_typed_math(content_blocks: Iterable) -> bool:
+    """True when the source marks math explicitly (equation_inline/_interline).
+
+    `content_list_v2.json` types real math as dedicated items but strips the
+    backslash from escaped currency in plain text (``\\$10.99`` becomes
+    ``$10.99``). In that format every bare ``$`` inside a text item is a
+    literal dollar, so pairing them as inline math would swallow prose such
+    as ``Big & Tall`` into math mode. Legacy outputs without typed math keep
+    the heuristic ``$…$`` splitting.
+    """
+    stack = [content_blocks]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if item.get("type") in {"equation_inline", "equation_interline"}:
+                return True
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return False
+
+
+def _runs_from_paragraph_content(items: Iterable, split_bare_dollars: bool = True) -> list[Run]:
     runs: list[Run] = []
     for item in items:
         if not isinstance(item, dict):
@@ -137,7 +159,7 @@ def _runs_from_paragraph_content(items: Iterable) -> list[Run]:
             # inline math) as a single "text" item instead of splitting it into
             # alternating "text"/"equation_inline" items.  Split here so that
             # inline math never reaches the translation layer as plain text.
-            for run in _split_text_at_math(content):
+            for run in _split_text_at_math(content, split_bare_dollars=split_bare_dollars):
                 runs.append(run)
         elif kind == "equation_inline" and isinstance(content, str):
             latex = content.strip()
@@ -146,40 +168,76 @@ def _runs_from_paragraph_content(items: Iterable) -> list[Run]:
     return runs
 
 
-# Matches $...$ (no nested $), \[...\] or \(...\) display/inline math.
-_INLINE_MATH_SPLIT = re.compile(
-    r"(\$[^$\n]+?\$"           # $...$
-    r"|\\\[[^\]]*?\\\]"        # \[...\]
-    r"|\\\([^\)]*?\\\))"       # \(…\)
-)
 
-
-def _split_text_at_math(text: str) -> list[Run]:
+def _split_text_at_math(text: str, split_bare_dollars: bool = True) -> list[Run]:
     """Split a raw text string at math-delimiter boundaries.
 
     Returns a list of alternating TextRun / InlineMath nodes so that formula
     content is never sent to the translation layer as translatable prose.
+
+    ``split_bare_dollars=False`` keeps explicit ``\\(\\)`` / ``\\[\\]``
+    delimiters but treats every bare ``$`` as a literal dollar (currency),
+    for sources that already type their math.
     """
-    parts = _INLINE_MATH_SPLIT.split(text)
     runs: list[Run] = []
-    for i, part in enumerate(parts):
-        if not part:
-            continue
-        if i % 2 == 1:
-            # Odd indices are the captured math groups.
-            latex = part
-            # Strip outer delimiters to store bare LaTeX.
-            if latex.startswith("$") and latex.endswith("$"):
-                latex = latex[1:-1]
-            elif latex.startswith("\\[") and latex.endswith("\\]"):
-                latex = latex[2:-2]
-            elif latex.startswith("\\(") and latex.endswith("\\)"):
-                latex = latex[2:-2]
-            runs.append(InlineMath(latex=latex.strip()))
+    cursor = 0
+    prose_start = 0
+
+    def escaped(offset: int) -> bool:
+        slashes = 0
+        offset -= 1
+        while offset >= 0 and text[offset] == "\\":
+            slashes += 1
+            offset -= 1
+        return slashes % 2 == 1
+
+    while cursor < len(text):
+        opening = text[cursor]
+        closing = ""
+        content_start = cursor + 1
+        if opening == "$" and split_bare_dollars and not escaped(cursor):
+            closing = "$"
+        elif text.startswith(r"\[", cursor):
+            closing = r"\]"
+            content_start = cursor + 2
+        elif text.startswith(r"\(", cursor):
+            closing = r"\)"
+            content_start = cursor + 2
         else:
-            if part.strip():
-                runs.append(TextRun(text=part))
+            cursor += 1
+            continue
+
+        if closing == "$":
+            end = content_start
+            while end < len(text):
+                if text[end] == "\n":
+                    end = -1
+                    break
+                if text[end] == "$" and not escaped(end):
+                    break
+                end += 1
+        else:
+            end = text.find(closing, content_start)
+        if end < 0 or end >= len(text):
+            cursor = content_start
+            continue
+
+        latex = text[content_start:end].strip()
+        if not latex:
+            cursor = end + len(closing)
+            continue
+        prose = text[prose_start:cursor]
+        if prose:
+            runs.append(TextRun(text=prose))
+        runs.append(InlineMath(latex=latex))
+        cursor = end + len(closing)
+        prose_start = cursor
+
+    tail = text[prose_start:]
+    if tail:
+        runs.append(TextRun(text=tail))
     return runs
+
 
 
 def _title_text(content: dict) -> str:
@@ -241,6 +299,10 @@ def blocks_to_ir(content_blocks: Iterable) -> list[Block]:
         an `Author` node so it is rendered as `\\author{}` and never translated.
     """
     positioned = _flatten_pages_with_positions(content_blocks)
+    # Typed-math outputs (content_list_v2) already mark formulas explicitly and
+    # strip the backslash from escaped currency, so bare "$" in prose must stay
+    # literal there instead of being paired into inline math.
+    split_bare_dollars = not _has_typed_math(content_blocks)
 
     para_counts: dict[str, int] = {}
     for _, block in positioned:
@@ -280,7 +342,7 @@ def blocks_to_ir(content_blocks: Iterable) -> list[Block]:
                 # Running header / stray text before the paper title.
                 continue
             items = content.get("paragraph_content") if isinstance(content, dict) else None
-            runs = _runs_from_paragraph_content(items or [])
+            runs = _runs_from_paragraph_content(items or [], split_bare_dollars=split_bare_dollars)
             if (
                 not author_handled
                 and raw_text
@@ -303,7 +365,7 @@ def blocks_to_ir(content_blocks: Iterable) -> list[Block]:
                 item_content = item.get("item_content") or []
                 if isinstance(item_content, str):
                     item_content = [{"type": "text", "content": item_content}]
-                runs = _runs_from_paragraph_content(item_content)
+                runs = _runs_from_paragraph_content(item_content, split_bare_dollars=split_bare_dollars)
                 if runs:
                     parsed_items.append(runs)
             if parsed_items:

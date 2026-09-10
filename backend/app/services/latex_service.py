@@ -208,6 +208,7 @@ def _run_latexmk(
     command = [
         settings.latexmk_path,
         engine_flag,
+        "-no-shell-escape",
         "-interaction=nonstopmode",
         "-output-directory=" + str(output_dir),
     ]
@@ -234,9 +235,15 @@ def _run_latexmk(
 
 _LOG_LINE_REF_RE = re.compile(r"^l\.(\d+)")
 _LOG_MISSING_CHAR_RE = re.compile(r"Missing character: There is no (.+?) \(U\+([0-9A-Fa-f]+)\)")
+_LOG_FILE_LINE_ERROR_RE = re.compile(
+    r"^(?P<file>[^\s]*\.tex):(?P<line>\d+):\s*(?P<message>.+?)\s*$", re.IGNORECASE
+)
+_LOG_LINE_SANE_MAX = 1_000_000
 
 
-def parse_latex_log_issues(log_path: Path) -> tuple[list[dict], list[dict]]:
+def parse_latex_log_issues(
+    log_path: Path, tex_name: str | None = None
+) -> tuple[list[dict], list[dict]]:
     """Extract actionable diagnostics from a TeX engine .log file.
 
     Returns ``(errors, missing_chars)`` where errors are
@@ -244,6 +251,11 @@ def parse_latex_log_issues(log_path: Path) -> tuple[list[dict], list[dict]]:
     ``l.<n>`` source line echoed right after them) and missing_chars are
     ``{"char", "codepoint", "count", "suggest"}`` aggregated from
     ``Missing character`` warnings.
+
+    TeX logs echo source text verbatim, so ``file.tex:N:``-shaped lines can be
+    planted inside the compiled document itself. When ``tex_name`` is given,
+    only lines whose file component matches that compiled file are accepted as
+    errors, keeping echoed decoys from fabricating anchor locations.
     """
     errors: list[dict] = []
     missing: dict[str, dict] = {}
@@ -257,6 +269,16 @@ def parse_latex_log_issues(log_path: Path) -> tuple[list[dict], list[dict]]:
     lines = content.splitlines()
     seen: set[tuple[int | None, str]] = set()
     for idx, line in enumerate(lines):
+        file_line_error = _LOG_FILE_LINE_ERROR_RE.match(line)
+        if file_line_error:
+            logged_name = file_line_error.group("file").replace("\\", "/").rsplit("/", 1)[-1]
+            if tex_name is None or logged_name.lower() == tex_name.lower():
+                tex_line = int(file_line_error.group("line"))
+                message = file_line_error.group("message")
+                key = (tex_line, message)
+                if 0 < tex_line <= _LOG_LINE_SANE_MAX and key not in seen and len(errors) < 20:
+                    seen.add(key)
+                    errors.append({"line": tex_line, "message": message})
         fatal = re.match(r"^!\s+(.+?)\s*$", line)
         if fatal:
             tex_line: int | None = None
@@ -407,10 +429,20 @@ _LATEX_TEXT_ESCAPES = (
 
 
 def _escape_latex_text(text: str) -> str:
-    out = text
-    for src, dst in _LATEX_TEXT_ESCAPES:
-        out = out.replace(src, dst)
-    return out
+    escape_map = dict(_LATEX_TEXT_ESCAPES)
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        # MinerU commonly emits currency as ``\$``. Preserve the already
+        # escaped pair instead of escaping its backslash a second time.
+        if text.startswith(r"\$", index):
+            out.append(r"\$")
+            index += 2
+            continue
+        ch = text[index]
+        out.append(escape_map.get(ch, ch))
+        index += 1
+    return "".join(out)
 
 
 def create_translated_tex(source_text: str, out_tex_path: Path, title: str | None = None) -> list[str]:

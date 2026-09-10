@@ -30,6 +30,29 @@ export type ReviewProposalItem = {
   image_url?: string | null
 }
 
+export type FailureItem = {
+  stage: string
+  message: string
+  retryable: boolean
+  chunk?: number | null
+  retry_count: number
+}
+
+export type LatexRecoveryItem = {
+  status: 'analyzing' | 'repairing' | 'recompiling' | 'succeeded' | 'failed'
+  diagnosis?: string | null
+  repairs: Array<{
+    start_line?: number
+    end_line?: number
+    original?: string
+    replacement?: string
+    reason?: string
+    round?: number
+  }>
+  rounds: number
+  last_error?: string | null
+}
+
 export type DocumentStatus = {
   document_id: string
   status: string
@@ -49,6 +72,8 @@ export type DocumentStatus = {
   stages: StageItem[]
   pending_reviews: ReviewProposalItem[]
   last_compile_warning?: string | null
+  failure?: FailureItem | null
+  latex_recovery?: LatexRecoveryItem | null
 }
 
 export type DocumentSummary = {
@@ -313,6 +338,14 @@ export async function uploadFile(file: File, options: UploadOptions = {}): Promi
 
 export async function getDocumentStatus(documentId: string): Promise<DocumentStatus> {
   return apiFetch(`/api/document/${documentId}`)
+}
+
+export async function retryDocument(documentId: string): Promise<{
+  document_id: string
+  status: 'queued'
+  resume_from: string
+}> {
+  return apiFetch(`/api/document/${documentId}/retry`, { method: 'POST' })
 }
 
 export async function listDocuments(): Promise<DocumentSummary[]> {

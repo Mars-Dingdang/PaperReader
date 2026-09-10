@@ -36,6 +36,28 @@ class ReviewProposalItem(BaseModel):
     image_url: str | None = None
 
 
+class FailureItem(BaseModel):
+    stage: str
+    message: str
+    retryable: bool = True
+    chunk: int | None = None
+    retry_count: int = 0
+
+
+class LatexRecoveryItem(BaseModel):
+    status: str
+    diagnosis: str | None = None
+    repairs: list[dict] = []
+    rounds: int = 0
+    last_error: str | None = None
+
+
+class RetryDocumentResponse(BaseModel):
+    document_id: str
+    status: str
+    resume_from: str
+
+
 class DocumentStatusResponse(BaseModel):
     document_id: str
     status: str
@@ -55,6 +77,8 @@ class DocumentStatusResponse(BaseModel):
     stages: list[StageItem] = []
     pending_reviews: list[ReviewProposalItem] = []
     last_compile_warning: str | None = None
+    failure: FailureItem | None = None
+    latex_recovery: LatexRecoveryItem | None = None
 
 
 class ChatRequest(BaseModel):

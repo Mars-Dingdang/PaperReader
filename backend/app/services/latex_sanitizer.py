@@ -38,7 +38,7 @@ _CHAR_TO_LATEX: dict[str, str] = {
     "⇒": r"\Rightarrow", "⇐": r"\Leftarrow", "⇔": r"\Leftrightarrow",
     "↦": r"\mapsto",
     "×": r"\times", "÷": r"\div", "±": r"\pm", "∓": r"\mp",
-    "⋅": r"\cdot", "∘": r"\circ", "∗": r"\ast",
+    "⋅": r"\cdot", "∘": r"\circ", "∗": r"\ast", "⋆": r"\star",
     "∈": r"\in", "∉": r"\notin", "⊂": r"\subset", "⊆": r"\subseteq",
     "⊃": r"\supset", "⊇": r"\supseteq", "∪": r"\cup", "∩": r"\cap",
     "∅": r"\emptyset", "∀": r"\forall", "∃": r"\exists",
@@ -72,8 +72,8 @@ _MATH_ENV_NAMES = (
 )
 _MATH_REGION_RE = re.compile(
     r"(?s)("
-    r"\$\$.+?\$\$"
-    r"|\$[^$\n]+?\$"
+    r"(?<!\\)\$\$.+?(?<!\\)\$\$"
+    r"|(?<!\\)\$[^$\n]+?(?<!\\)\$"
     r"|\\\[.+?\\\]"
     r"|\\\(.+?\\\)"
     r"|\\begin\{(?:" + "|".join(_MATH_ENV_NAMES) + r")\}.+?"
@@ -183,6 +183,10 @@ def _is_font_safe_char(ch: str) -> bool:
     code = ord(ch)
     if code < 0x80:
         return True
+    # Latin Modern/OpenType covers Latin-1, Latin Extended, IPA/modifier
+    # letters and combining marks used in author names and phonetic notation.
+    if 0x00A0 <= code <= 0x036F:
+        return True
     if ch in _CHAR_TO_LATEX:
         return True  # sanitize_latex_body converts it to a command
     if ch in _FONT_SAFE_EXTRAS:
@@ -222,6 +226,17 @@ _SQRT_FAULT_A_RE = re.compile(
 _SQRT_FAULT_B_RE = re.compile(
     r"\\sqrt[ \t]*\[[ \t]*(" + _BRACED + r")[ \t]*/[ \t]*(" + _BRACED + r")[ \t]*\}"
 )
+_GREEK_COMMANDS = (
+    "alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|"
+    "kappa|lambda|mu|nu|xi|pi|varpi|rho|varrho|sigma|varsigma|tau|upsilon|"
+    "phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega"
+)
+_MATHBF_GREEK_RE = re.compile(
+    r"\\mathbf\s*\{\s*(\\(?:" + _GREEK_COMMANDS + r"))\s*\}"
+)
+_ROMAN_ACCENT_RE = re.compile(
+    r"\\mathrm\s*\{\s*\\(bar|hat|tilde)\s*\{\s*([^{}]+?)\s*\}\s*\}"
+)
 
 
 def _line_of(text: str, offset: int) -> int:
@@ -233,7 +248,7 @@ def repair_common_math_faults(text: str) -> tuple[str, list[str]]:
     text plus one human-readable note per repair (with 1-based line numbers
     referring to the *input* text).
     """
-    if not text or "\\sqrt" not in text:
+    if not text:
         return text, []
     repairs: list[str] = []
 
@@ -259,11 +274,92 @@ def repair_common_math_faults(text: str) -> tuple[str, list[str]]:
     # faithful reading of the OCR output.
     repaired = _SQRT_FAULT_A_RE.sub(fix_variant_a, text)
     repaired = _SQRT_FAULT_B_RE.sub(fix_variant_b, repaired)
+
+    def fix_bold_greek(match: re.Match[str]) -> str:
+        line = _line_of(text, match.start())
+        repairs.append(f"L{line}: replaced \\mathbf around a Greek symbol with \\boldsymbol")
+        return f"\\boldsymbol{{{match.group(1)}}}"
+
+    def fix_roman_accent(match: re.Match[str]) -> str:
+        line = _line_of(text, match.start())
+        accent = {"bar": "overline", "hat": "widehat", "tilde": "widetilde"}[match.group(1)]
+        repairs.append(f"L{line}: moved math accent outside \\mathrm")
+        return f"\\{accent}{{\\mathrm{{{match.group(2).strip()}}}}}"
+
+    repaired = _MATHBF_GREEK_RE.sub(fix_bold_greek, repaired)
+    repaired = _ROMAN_ACCENT_RE.sub(fix_roman_accent, repaired)
     return repaired, repairs
 
 
-def _count_unescaped(text: str, char: str) -> int:
-    return len(re.findall(rf"(?<!\\){re.escape(char)}", text))
+_VERBATIM_ENVIRONMENTS = {"verbatim", "verbatim*", "lstlisting", "minted"}
+_VERBATIM_BEGIN_RE = re.compile(
+    r"\\begin\{(" + "|".join(re.escape(name) for name in _VERBATIM_ENVIRONMENTS) + r")\}"
+)
+
+
+def _mask_inline_verbatim_and_comment(line: str) -> str:
+    masked = list(line)
+    cursor = 0
+    while cursor < len(line):
+        if line[cursor] == "%" and not _is_escaped_at(line, cursor):
+            masked[cursor:] = " " * (len(line) - cursor)
+            break
+        if (
+            line.startswith(r"\verb", cursor)
+            and not _is_escaped_at(line, cursor)
+            and cursor + 5 < len(line)
+        ):
+            delimiter_offset = cursor + 5
+            if line[delimiter_offset] == "*" and delimiter_offset + 1 < len(line):
+                delimiter_offset += 1
+            delimiter = line[delimiter_offset]
+            end = line.find(delimiter, delimiter_offset + 1)
+            end = len(line) - 1 if end == -1 else end
+            masked[cursor : end + 1] = " " * (end + 1 - cursor)
+            cursor = end + 1
+            continue
+        cursor += 1
+    return "".join(masked)
+
+
+def _masked_tex_lines(text: str) -> list[str]:
+    """Mask comments and verbatim payload while preserving line numbers/offsets."""
+    result: list[str] = []
+    active_verbatim: str | None = None
+    # Split on "\n" only: TeX counts lines the same way, and splitlines() would
+    # additionally break on U+2028/U+2029/\x0b/\x0c inside prose, shifting the
+    # reported line numbers away from the compiler's own anchors.
+    for raw_line in text.split("\n"):
+        if active_verbatim is not None:
+            end_marker = f"\\end{{{active_verbatim}}}"
+            end = raw_line.find(end_marker)
+            if end == -1:
+                result.append(" " * len(raw_line))
+                continue
+            line = " " * end + end_marker
+            line += _mask_inline_verbatim_and_comment(raw_line[end + len(end_marker) :])
+            active_verbatim = None
+            result.append(line)
+            continue
+
+        line = _mask_inline_verbatim_and_comment(raw_line)
+        begin = _VERBATIM_BEGIN_RE.search(line)
+        if begin is not None:
+            name = begin.group(1)
+            end_marker = f"\\end{{{name}}}"
+            end = line.find(end_marker, begin.end())
+            if end == -1:
+                line = line[: begin.end()] + " " * (len(line) - begin.end())
+                active_verbatim = name
+            else:
+                line = (
+                    line[: begin.end()]
+                    + " " * (end - begin.end())
+                    + line[end : end + len(end_marker)]
+                    + " " * (len(line) - end - len(end_marker))
+                )
+        result.append(line)
+    return result
 
 
 def validate_math_structure(text: str) -> list[tuple[int, str]]:
@@ -274,27 +370,160 @@ def validate_math_structure(text: str) -> list[tuple[int, str]]:
     if not text:
         return issues
 
-    for line_no, line in enumerate(text.splitlines(), start=1):
-        if _count_unescaped(line, "$") % 2 == 1:
-            issues.append((line_no, "unbalanced '$' (odd number of unescaped '$' on the line)"))
+    masked_text = "\n".join(_masked_tex_lines(text))
+    stack: list[dict[str, int | str]] = []
+    line_no = 1
+    cursor = 0
+    delimiter_pairs = {r"\(": r"\)", r"\[": r"\]"}
+    closing_delimiters = {value: key for key, value in delimiter_pairs.items()}
+    while cursor < len(masked_text):
+        if masked_text[cursor] == "\n":
+            line_no += 1
+            cursor += 1
+            continue
+        token = None
+        is_open = False
+        is_close = False
+        if masked_text[cursor] == "$" and not _is_escaped_at(masked_text, cursor):
+            if stack and stack[-1]["token"] == "$":
+                token = "$"
+                is_close = True
+            else:
+                token = "$$" if masked_text.startswith("$$", cursor) else "$"
+            if stack and stack[-1]["token"] == token:
+                is_close = True
+            elif not stack:
+                is_open = True
+            else:
+                issues.append((line_no, f"math delimiter {token!r} is nested or mismatched"))
+        else:
+            for candidate in (*delimiter_pairs, *closing_delimiters):
+                if masked_text.startswith(candidate, cursor) and not _is_escaped_at(masked_text, cursor):
+                    token = candidate
+                    is_open = candidate in delimiter_pairs
+                    is_close = candidate in closing_delimiters
+                    break
+        if token is not None:
+            if is_open:
+                if stack:
+                    issues.append((line_no, f"math delimiter {token!r} is nested or mismatched"))
+                else:
+                    stack.append({"token": token, "line": line_no, "brace_depth": 0})
+            elif is_close:
+                expected_open = closing_delimiters.get(token, token)
+                if not stack or stack[-1]["token"] != expected_open:
+                    issues.append((line_no, f"math delimiter {token!r} has no matching opener"))
+                else:
+                    opened = stack.pop()
+                    depth = int(opened["brace_depth"])
+                    if depth:
+                        issues.append((
+                            int(opened["line"]),
+                            f"unbalanced braces in math region (depth {depth:+d})",
+                        ))
+            cursor += len(token)
+            continue
+        if stack and masked_text[cursor] in "{}" and not _is_escaped_at(masked_text, cursor):
+            stack[-1]["brace_depth"] = int(stack[-1]["brace_depth"]) + (
+                1 if masked_text[cursor] == "{" else -1
+            )
+        cursor += 1
 
-    for match in _MATH_REGION_RE.finditer(text):
-        segment = match.group(0)
-        depth = _count_unescaped(segment, "{") - _count_unescaped(segment, "}")
-        if depth != 0:
-            issues.append((
-                _line_of(text, match.start()),
-                f"unbalanced braces in math region (depth {depth:+d}): {segment[:60]!r}",
-            ))
+    for opened in stack:
+        token = str(opened["token"])
+        label = "unbalanced '$'" if token in {"$", "$$"} else f"unbalanced {token!r}"
+        issues.append((int(opened["line"]), f"{label} (opening delimiter is not closed)"))
 
     for pattern, hint in (
         (_SQRT_FAULT_A_RE, "\\sqrt root index contains '/' and the mandatory radicand is missing"),
         (_SQRT_FAULT_B_RE, "\\sqrt root index is never closed with ']' and the radicand is missing"),
     ):
-        for match in pattern.finditer(text):
-            issues.append((_line_of(text, match.start()), hint))
+        for match in pattern.finditer(masked_text):
+            issues.append((_line_of(masked_text, match.start()), hint))
 
     return issues
+
+
+_ALIGNMENT_ENVIRONMENTS = {
+    "align", "align*", "aligned", "alignat", "alignat*", "array",
+    "tabular", "tabular*", "matrix", "pmatrix", "bmatrix", "vmatrix",
+    "Vmatrix", "smallmatrix", "cases", "eqnarray", "eqnarray*",
+}
+_ENV_TOKEN_RE = re.compile(r"\\(begin|end)\{([^{}]+)\}")
+
+
+def _is_escaped_at(text: str, offset: int) -> bool:
+    slashes = 0
+    offset -= 1
+    while offset >= 0 and text[offset] == "\\":
+        slashes += 1
+        offset -= 1
+    return slashes % 2 == 1
+
+
+def validate_latex_structure(text: str) -> list[tuple[int, str]]:
+    """Conservative preflight for hazards outside the existing math lint.
+
+    The function reports only; it never rewrites source. Alignment tabs remain
+    legal inside table/matrix/alignment environments and escaped TeX specials
+    are ignored.
+    """
+    if not text:
+        return []
+    issues = list(validate_math_structure(text))
+    environment_stack: list[tuple[str, int]] = []
+    brace_stack: list[int] = []
+
+    masked_lines = _masked_tex_lines(text)
+    for line_no, (raw_line, line) in enumerate(
+        zip(text.split("\n"), masked_lines), start=1
+    ):
+        for ch in raw_line:
+            if ord(ch) < 32 and ch not in "\n\r\t":
+                issues.append((line_no, f"unsafe C0 control character U+{ord(ch):04X}"))
+        events = {match.start(): match for match in _ENV_TOKEN_RE.finditer(line)}
+        cursor = 0
+        while cursor < len(line):
+            event = events.get(cursor)
+            if event is not None:
+                action, name = event.group(1), event.group(2)
+                if action == "begin":
+                    environment_stack.append((name, line_no))
+                elif not environment_stack:
+                    issues.append((line_no, f"environment '{name}' ends without a matching begin"))
+                elif environment_stack[-1][0] != name:
+                    expected = environment_stack[-1][0]
+                    issues.append((line_no, f"environment mismatch: expected end{{{expected}}}, got end{{{name}}}"))
+                    environment_stack.pop()
+                else:
+                    environment_stack.pop()
+                cursor = event.end()
+                continue
+
+            ch = line[cursor]
+            escaped = _is_escaped_at(line, cursor)
+            if ch == "{" and not escaped:
+                brace_stack.append(line_no)
+            elif ch == "}" and not escaped:
+                if brace_stack:
+                    brace_stack.pop()
+                else:
+                    issues.append((line_no, "unbalanced braces: unexpected '}'"))
+            elif ch == "&" and not escaped:
+                if not any(name in _ALIGNMENT_ENVIRONMENTS for name, _ in environment_stack):
+                    issues.append((line_no, "bare '&' outside an alignment/table environment"))
+            cursor += 1
+
+        for ch in line:
+            if ord(ch) >= 32 and not _is_font_safe_char(ch):
+                issues.append((line_no, f"font-unsafe character {ch!r} (U+{ord(ch):04X})"))
+
+    if brace_stack:
+        issues.append((brace_stack[-1], f"unbalanced braces: {len(brace_stack)} opening brace(s) remain"))
+    for name, line_no in environment_stack:
+        issues.append((line_no, f"environment '{name}' is not closed"))
+
+    return sorted(set(issues), key=lambda issue: (issue[0], issue[1]))
 
 
 def sanitize_and_repair(text: str) -> tuple[str, list[str]]:
@@ -308,10 +537,19 @@ def sanitize_and_repair(text: str) -> tuple[str, list[str]]:
     stay a single literal character, so substituting it (e.g. to
     ``$\\square$``) breaks the compile with "Invalid argument".
     """
+    control_count = sum(1 for ch in text if ord(ch) < 32 and ch not in "\n\r\t")
+    if control_count:
+        text = "".join(ch for ch in text if ord(ch) >= 32 or ch in "\n\r\t")
+    control_repairs = (
+        [f"Removed {control_count} unsafe C0 control character(s)"]
+        if control_count
+        else []
+    )
     parts = _split_document(text)
     if parts is None:
         sanitized = sanitize_latex_body(text)
-        return repair_common_math_faults(sanitized)
+        repaired, repairs = repair_common_math_faults(sanitized)
+        return repaired, control_repairs + repairs
     head, body, tail = parts
     body, repairs = repair_common_math_faults(sanitize_latex_body(body))
-    return head + body + tail, repairs
+    return head + body + tail, control_repairs + repairs

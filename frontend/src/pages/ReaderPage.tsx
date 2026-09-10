@@ -20,6 +20,7 @@ import {
   locateCounterpart,
   makeDataUrl,
   renameDocument,
+  retryDocument,
   translatedPdfName,
   updateSettings,
   uploadFile
@@ -52,6 +53,8 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
   const [favorites, setFavorites] = useState<string[]>(user.settings.favorites)
   const [literatureChatOpen, setLiteratureChatOpen] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const [retrying, setRetrying] = useState(false)
+  const [pollRevision, setPollRevision] = useState(0)
 
   const pollTimerRef = useRef<number | null>(null)
   const originalPaneRef = useRef<PdfPaneHandle | null>(null)
@@ -174,11 +177,33 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
         pollTimerRef.current = null
       }
     }
-  }, [activeId, onLogout])
+  }, [activeId, onLogout, pollRevision])
 
   const activeDoc: DocumentStatus | undefined = activeId ? docCache[activeId] : undefined
   const originalPdfUrl = activeDoc?.original_pdf_url ? makeDataUrl(activeDoc.original_pdf_url) : undefined
   const translatedPdfUrl = activeDoc?.translated_pdf_url ? makeDataUrl(activeDoc.translated_pdf_url) : undefined
+
+  const handleRetry = useCallback(async () => {
+    if (!activeId || retrying) return
+    setRetrying(true)
+    try {
+      const queued = await retryDocument(activeId)
+      setDocCache((cache) => ({
+        ...cache,
+        [activeId]: cache[activeId]
+          ? { ...cache[activeId], status: queued.status, current_stage_label: `等待从 ${queued.resume_from} 恢复` }
+          : cache[activeId]
+      }))
+      setSummaries((items) => items.map((item) => (
+        item.document_id === activeId ? { ...item, status: 'queued' } : item
+      )))
+      setPollRevision((value) => value + 1)
+    } catch (error: any) {
+      setNotice(`重试失败：${error?.message ?? String(error)}`)
+    } finally {
+      setRetrying(false)
+    }
+  }, [activeId, retrying])
 
   useEffect(() => {
     setOverrideLeft(null)
@@ -370,6 +395,10 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
             currentStageLabel={activeDoc.current_stage_label}
             etaSeconds={activeDoc.eta_seconds}
             stages={stages}
+            failure={activeDoc.failure}
+            latexRecovery={activeDoc.latex_recovery}
+            retrying={retrying}
+            onRetry={handleRetry}
           />
         )}
         {!activeId ? (

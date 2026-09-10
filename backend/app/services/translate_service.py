@@ -1,6 +1,11 @@
+import hashlib
+import json
 import logging
+import os
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Callable, TypeVar
 
 from app.core.config import settings
@@ -49,8 +54,11 @@ def _run_concurrent(
     return results
 
 
-_PLACEHOLDER_PATTERN = re.compile(r"(\\$[^$]+\\$|\\\\\[[^\]]+\\\\\]|\\\\\([^\)]+\\\\\)|\\\\cite\{[^}]+\}|\\\\ref\{[^}]+\}|https?://\\S+)")
+_PLACEHOLDER_PATTERN = re.compile(r"((?<!\\)\$[^$\n]+?(?<!\\)\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\\(?:cite|ref)\{[^}]+\}|https?://\S+)")
 _MAX_CHARS_PER_CHUNK = 4000
+_STRUCTURAL_TAG_PATTERN = re.compile(r"</?[A-Za-z][^>\r\n]*>")
+_PLACEHOLDER_TOKEN_RE = re.compile(r"__PR_PH_\d+__")
+_UNESCAPED_DOLLAR_RE = re.compile(r"(?<!\\)\$")
 _LATEX_FENCE_PATTERN = re.compile(r"^```(?:latex)?\s*|\s*```$", re.MULTILINE)
 _DOCUMENT_BODY_PATTERN = re.compile(r"(?s)^(.*?\\begin\{document\})(.*?)(\\end\{document\}.*)$")
 _CJK_PACKAGE_PATTERN = re.compile(r"\\usepackage(?:\[[^\]]*\])?\{(?:ctex|xeCJK|CJKutf8|CJK)\}")
@@ -72,17 +80,41 @@ _XELATEX_UNICODE_COMPAT_SNIPPET = (
 
 def protect_placeholders(text: str) -> tuple[str, dict[str, str]]:
     mapping: dict[str, str] = {}
+    source_text = text
+    next_index = 0
 
     def repl(match: re.Match[str]) -> str:
-        token = f"<PH_{len(mapping)}>"
+        nonlocal next_index
+        token = f"__PR_PH_{next_index:04d}__"
+        while token in source_text or token in mapping:
+            next_index += 1
+            token = f"__PR_PH_{next_index:04d}__"
+        next_index += 1
         mapping[token] = match.group(0)
         return token
 
+    text = _STRUCTURAL_TAG_PATTERN.sub(repl, text)
     return _PLACEHOLDER_PATTERN.sub(repl, text), mapping
 
 
+def _placeholder_tokens(text: str) -> list[str]:
+    return _PLACEHOLDER_TOKEN_RE.findall(text)
+
+
+def _placeholder_only(text: str, mapping: dict[str, str] | None = None) -> bool:
+    if mapping is None:
+        remainder = _PLACEHOLDER_TOKEN_RE.sub("", text)
+    else:
+        remainder = text
+        for token in mapping:
+            remainder = remainder.replace(token, "")
+    return not remainder.strip()
+
+
 def restore_placeholders(text: str, mapping: dict[str, str]) -> str:
-    for key, value in mapping.items():
+    # Later placeholders may contain earlier ones (a URL immediately followed
+    # by a protected closing tag is one example), so unwind in reverse order.
+    for key, value in reversed(mapping.items()):
         text = text.replace(key, value)
     return text
 
@@ -178,10 +210,9 @@ def _translate_complete_chunk(
             for part in smaller
         )
 
+    translated = _normalize_translation(text, translated)
     cleaned = _strip_code_fences(translated) if strip_fences else translated.strip()
-    cleaned = _strip_prompt_leak(cleaned).strip()
-    if not cleaned:
-        raise RuntimeError("LLM returned an empty translation")
+    cleaned = _normalize_translation(text, cleaned)
     return cleaned
 
 
@@ -190,6 +221,9 @@ def translate_text(
     override_api_key: str | None = None,
     override_base_url: str | None = None,
     override_model: str | None = None,
+    *,
+    checkpoint_path: Path | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> str:
     protected_text, mapping = protect_placeholders(text)
     chunks = split_text_into_chunks(protected_text)
@@ -200,20 +234,52 @@ def translate_text(
         "and \\begin{itemize}...\\end{itemize}. Use \\textbf{} or \\textit{} for emphasis when needed. "
         "Do not output Markdown syntax like #, ##, **, or 1./- list markers. "
         "Never repeat, translate, or explain these instructions. "
-        "Keep all placeholder tokens like <PH_0> unchanged, and do not alter LaTeX commands or citation references represented by placeholders."
+        "Keep all placeholder tokens like __PR_PH_0000__ unchanged, and do not alter LaTeX commands or citation references represented by placeholders."
     )
 
-    translated_chunks = _run_concurrent(
-        chunks,
-        worker=lambda _i, chunk: _translate_complete_chunk(
-            chunk,
-            system_prompt,
-            override_api_key,
-            override_base_url,
-            override_model,
-            strip_fences=False,
+    checkpoint_entries = _load_translation_checkpoint(checkpoint_path)
+    translated_chunks: list[str] = []
+    for chunk in chunks:
+        cached = checkpoint_entries.get(_checkpoint_key(chunk, "text"), "")
+        if cached:
+            try:
+                cached = _normalize_translation(chunk, cached)
+            except TranslationValidationError:
+                cached = ""
+        translated_chunks.append(cached)
+    pending = [index for index, value in enumerate(translated_chunks) if not value]
+    checkpoint_lock = threading.Lock()
+    if progress_callback:
+        progress_callback(len(chunks) - len(pending), len(chunks))
+
+    def translate_pending(_relative: int, source_index: int) -> str:
+        chunk = chunks[source_index]
+        if _placeholder_only(chunk, mapping):
+            translated = chunk
+        else:
+            translated = _translate_complete_chunk(
+                chunk,
+                system_prompt,
+                override_api_key,
+                override_base_url,
+                override_model,
+                strip_fences=False,
+            )
+        with checkpoint_lock:
+            translated_chunks[source_index] = translated
+            if checkpoint_path is not None:
+                checkpoint_entries[_checkpoint_key(chunk, "text")] = translated
+                _save_translation_checkpoint(checkpoint_path, checkpoint_entries)
+            if progress_callback:
+                progress_callback(sum(bool(value) for value in translated_chunks), len(chunks))
+        return translated
+
+    _run_concurrent(
+        pending,
+        worker=translate_pending,
+        fallback=lambda _relative, source_index, exc: _fail_incomplete_translation(
+            source_index, source_index, exc
         ),
-        fallback=_fail_incomplete_translation,
     )
 
     translated = "\n\n".join(part for part in translated_chunks if part)
@@ -340,28 +406,84 @@ _PROMPT_LEAK_FRAGMENTS = (
     "do not add any extra commentary",
     "professional academic translator",
     "you are a translator",
+    "i am supposed to translate",
+    "i'm supposed to translate",
+    "inside these tags",
+    "cannot translate",
+    "unable to translate",
+    "没有实际的待译文本",
+    "无法进行翻译",
 )
 
+_REFUSAL_FRAGMENTS = (
+    "i can't help with that",
+    "i cannot comply",
+    "as an ai language model",
+    "请提供需要翻译",
+)
+_TRANSLATION_CONTRACT_VERSION = "ir-translation-v2"
 
-def _strip_prompt_leak(text: str) -> str:
-    """Remove lines that look like echoed prompt instructions.
 
-    Some upstream gateways do not honor the system role strictly, causing the
-    model to translate / repeat the system prompt into the user-visible output.
-    We drop any line whose lower-cased form contains a known instruction
-    fragment. This is intentionally conservative: only full lines are removed.
+class TranslationValidationError(RuntimeError):
+    pass
+
+
+class TranslationChunkError(RuntimeError):
+    def __init__(self, index: int, cause: Exception):
+        super().__init__(str(cause))
+        self.index = index
+
+
+def _repair_lost_dollar_escapes(source: str, translated: str) -> str:
+    """Re-escape literal ``$`` whose backslash the model dropped.
+
+    Real math is placeholder-protected before the model sees a segment, so
+    when the source holds no unescaped ``$`` every unescaped ``$`` in the
+    output is escaped currency that lost its backslash. Restoring it keeps
+    prose such as ``Big & Tall`` out of fake inline math at render time; a
+    re-translation could not be relied on here because a temperature-zero
+    model reproduces the same corruption deterministically.
     """
-    if not text:
-        return text
-    lines = text.splitlines()
-    cleaned: list[str] = []
-    for line in lines:
-        low = line.lower()
-        if any(frag in low for frag in _PROMPT_LEAK_FRAGMENTS):
-            continue
-        cleaned.append(line)
-    # Collapse leading/trailing blank lines introduced by the removal.
-    return "\n".join(cleaned).strip("\n")
+    if _UNESCAPED_DOLLAR_RE.search(source) or not _UNESCAPED_DOLLAR_RE.search(translated):
+        return translated
+    return _UNESCAPED_DOLLAR_RE.sub(r"\\$", translated)
+
+
+def _normalize_translation(source: str, translated: str) -> str:
+    """Repair deterministic corruptions first, then validate the result."""
+    repaired = _repair_lost_dollar_escapes(source, translated)
+    _validate_translation(source, repaired)
+    return repaired
+
+
+def _validate_translation(source: str, translated: str) -> None:
+    """Reject structurally unsafe or clearly non-translation model output."""
+    if not translated.strip():
+        raise TranslationValidationError("empty translation")
+    if "```" in translated:
+        raise TranslationValidationError("unexpected code fence")
+    controls = [ch for ch in translated if ord(ch) < 32 and ch not in "\n\r\t"]
+    if controls:
+        raise TranslationValidationError("unsafe control character")
+    if _placeholder_tokens(source) != _placeholder_tokens(translated):
+        raise TranslationValidationError("placeholder count or order changed")
+    # Real math is placeholder-protected before the model sees a segment, so a
+    # source without unescaped ``$`` must never gain one: losing the backslash
+    # of ``\$10.99`` would later pair into fake inline math and swallow prose
+    # such as ``Big & Tall`` into math mode.
+    if not _UNESCAPED_DOLLAR_RE.search(source) and _UNESCAPED_DOLLAR_RE.search(translated):
+        raise TranslationValidationError("unescaped '$' introduced (escaped currency/math lost)")
+    if _STRUCTURAL_TAG_PATTERN.findall(source) != _STRUCTURAL_TAG_PATTERN.findall(translated):
+        raise TranslationValidationError("unexpected structural tag")
+    low_source = source.lower()
+    low_output = translated.lower()
+    for fragment in _PROMPT_LEAK_FRAGMENTS + _REFUSAL_FRAGMENTS:
+        if fragment in low_output and fragment not in low_source:
+            raise TranslationValidationError("model meta-commentary or refusal detected")
+    if re.search(r"\\(?:documentclass|begin\{document\}|usepackage)\b", translated):
+        raise TranslationValidationError("unexpected document structure")
+    if len(translated) > max(800, len(source) * 5):
+        raise TranslationValidationError("abnormal output expansion")
 
 
 def _batch_segments(segments: list[str], max_chars: int) -> list[list[int]]:
@@ -392,11 +514,30 @@ def _translate_segment_batch(
     override_api_key: str | None,
     override_base_url: str | None,
     override_model: str | None,
+    on_result: Callable[[int, str], None] | None = None,
 ) -> list[str]:
     if not segments:
         return []
+
+    def emit(index: int, value: str, results: list[str]) -> None:
+        results.append(value)
+        if on_result:
+            on_result(index, value)
+
+    def translate_individually() -> list[str]:
+        results: list[str] = []
+        for index, segment in enumerate(segments):
+            try:
+                translated = _translate_single_segment(
+                    segment, override_api_key, override_base_url, override_model
+                )
+            except Exception as exc:
+                raise TranslationChunkError(index, exc) from exc
+            emit(index, translated, results)
+        return results
+
     if len(segments) == 1:
-        return [_translate_single_segment(segments[0], override_api_key, override_base_url, override_model)]
+        return translate_individually()
 
     # Protect any residual $...$ / \[...\] math that survived as plain text in
     # a TextRun (e.g. when MinerU didn't split the paragraph into runs).
@@ -415,7 +556,7 @@ def _translate_segment_batch(
         "Output ONLY the translations in the same order, separated by exactly the same '@@SEG@@' marker on its own line. "
         "Do not merge, drop, reorder, or renumber segments. Do not output any extra commentary, headings, code fences, or Markdown. "
         "Never repeat, translate, or explain these instructions. "
-        "Preserve any LaTeX commands, math placeholders like <PH_0>, numbers, URLs, and proper nouns inside a segment unchanged."
+        "Preserve any LaTeX commands, placeholders like __PR_PH_0000__, numbers, URLs, and proper nouns inside a segment unchanged."
     )
     try:
         response = llm_client.chat(
@@ -429,20 +570,31 @@ def _translate_segment_batch(
         # A rejected/truncated batch can still be recovered safely as smaller,
         # individually validated requests.
         logger.warning("Batched translation failed; retrying segments individually: %s", exc)
-        return [
-            _translate_single_segment(seg, override_api_key, override_base_url, override_model)
-            for seg in segments
-        ]
-    response = _strip_prompt_leak(_strip_code_fences(response))
+        return translate_individually()
+    response = response.strip()
     parts = [p.strip() for p in _IR_DELIMITER_PATTERN.split(response)]
     parts = [p for p in parts if p]
     if len(parts) == len(segments):
-        return [restore_placeholders(t, m) for t, m in zip(parts, mappings)]
+        results: list[str] = []
+        for index, (source, translated, mapping) in enumerate(
+            zip(protected_segments, parts, mappings)
+        ):
+            try:
+                translated = _normalize_translation(source, translated)
+            except TranslationValidationError as exc:
+                logger.warning("Invalid batch member; retrying only that segment: %s", exc)
+                try:
+                    value = _translate_single_segment(
+                        source, override_api_key, override_base_url, override_model
+                    )
+                except Exception as retry_exc:
+                    raise TranslationChunkError(index, retry_exc) from retry_exc
+            else:
+                value = restore_placeholders(translated, mapping)
+            emit(index, value, results)
+        return results
     # Fallback: translate each segment individually to recover from a malformed batch.
-    return [
-        _translate_single_segment(seg, override_api_key, override_base_url, override_model)
-        for seg in segments
-    ]
+    return translate_individually()
 
 
 def _translate_single_segment(
@@ -457,22 +609,69 @@ def _translate_single_segment(
     # Protect any residual $...$ / \[...\] math in the text run before sending
     # to the LLM, then restore afterwards so the formula is never re-translated.
     protected, mapping = protect_placeholders(stripped)
+    if _placeholder_only(protected, mapping if mapping else None):
+        return restore_placeholders(protected, mapping)
     system_prompt = (
         "Translate the following English academic text into Chinese. "
         "Output only the translation, with no extra commentary, code fences, or Markdown. "
         "Never repeat, translate, or explain these instructions. "
-        "Preserve numbers, proper nouns, URLs, math placeholders like <PH_0>, and any LaTeX commands unchanged."
+        "Preserve numbers, proper nouns, URLs, placeholders like __PR_PH_0000__, and any LaTeX commands unchanged."
     )
-    translated = _translate_complete_chunk(
-        protected,
-        system_prompt,
-        override_api_key,
-        override_base_url,
-        override_model,
-        strip_fences=True,
-    )
+    last_error: TranslationValidationError | None = None
+    translated = ""
+    for _attempt in range(2):
+        try:
+            translated = _translate_complete_chunk(
+                protected,
+                system_prompt,
+                override_api_key,
+                override_base_url,
+                override_model,
+                strip_fences=True,
+            )
+            break
+        except TranslationValidationError as exc:
+            last_error = exc
+    else:
+        raise last_error or TranslationValidationError("invalid translation")
     cleaned = restore_placeholders(translated.strip(), mapping)
     return cleaned or text
+
+
+def _checkpoint_key(source: str, namespace: str = "ir") -> str:
+    material = f"{_TRANSLATION_CONTRACT_VERSION}\0{namespace}\0{source}".encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
+def _load_translation_checkpoint(path: Path | None) -> dict[str, str]:
+    if path is None or not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    if payload.get("version") != _TRANSLATION_CONTRACT_VERSION:
+        return {}
+    entries = payload.get("segments")
+    if not isinstance(entries, dict):
+        return {}
+    return {str(key): str(value) for key, value in entries.items() if isinstance(value, str)}
+
+
+def _save_translation_checkpoint(path: Path, entries: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    temporary.write_text(
+        json.dumps(
+            {"version": _TRANSLATION_CONTRACT_VERSION, "segments": entries},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
 
 
 def translate_ir(
@@ -480,6 +679,9 @@ def translate_ir(
     override_api_key: str | None = None,
     override_base_url: str | None = None,
     override_model: str | None = None,
+    *,
+    checkpoint_path: Path | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> None:
     """Translate the prose content of an IR list in place.
 
@@ -503,23 +705,61 @@ def translate_ir(
         segments.extend(pieces)
         segment_groups.append((indices, mapping))
 
+    checkpoint_entries = _load_translation_checkpoint(checkpoint_path)
     translations: list[str] = [""] * len(segments)
-    batches = _batch_segments(segments, max(max_segment_chars, settings.translate_batch_max_chars))
+    for index, segment in enumerate(segments):
+        cached = checkpoint_entries.get(_checkpoint_key(segment))
+        if cached:
+            try:
+                cached = _normalize_translation(segment, cached)
+            except TranslationValidationError:
+                continue
+            translations[index] = cached
+
+    pending = [index for index, value in enumerate(translations) if not value]
+    relative_batches = _batch_segments(
+        [segments[index] for index in pending],
+        max(max_segment_chars, settings.translate_batch_max_chars),
+    )
+    batches = [[pending[index] for index in batch] for batch in relative_batches]
+    checkpoint_lock = threading.Lock()
+    progress_lock = threading.Lock()
+    if progress_callback:
+        progress_callback(len(segments) - len(pending), len(segments))
 
     def _do_batch(_i: int, batch: list[int]) -> str:
         batch_segments = [segments[j] for j in batch]
-        batch_translations = _translate_segment_batch(
-            batch_segments,
-            override_api_key=override_api_key,
-            override_base_url=override_base_url,
-            override_model=override_model,
-        )
-        for slot, value in zip(batch, batch_translations):
-            translations[slot] = value or segments[slot]
+        def persist_result(relative_index: int, value: str) -> None:
+            slot = batch[relative_index]
+            value = _normalize_translation(segments[slot], value)
+            with checkpoint_lock:
+                translations[slot] = value
+                if checkpoint_path is not None:
+                    checkpoint_entries[_checkpoint_key(segments[slot])] = translations[slot]
+                    _save_translation_checkpoint(checkpoint_path, checkpoint_entries)
+            if progress_callback:
+                with progress_lock:
+                    progress_callback(sum(bool(item) for item in translations), len(segments))
+
+        try:
+            _translate_segment_batch(
+                batch_segments,
+                override_api_key=override_api_key,
+                override_base_url=override_base_url,
+                override_model=override_model,
+                on_result=persist_result,
+            )
+        except TranslationChunkError as exc:
+            source_index = batch[exc.index]
+            raise RuntimeError(
+                f"Translation incomplete: chunk {source_index + 1} failed"
+            ) from exc
         return ""
 
     def _fallback(_i: int, batch: list[int], _exc: Exception) -> str:
-        return _fail_incomplete_translation(_i, batch, _exc)
+        if isinstance(_exc, RuntimeError) and str(_exc).startswith("Translation incomplete: chunk "):
+            raise _exc
+        return _fail_incomplete_translation(batch[0], batch, _exc)
 
     _run_concurrent(batches, worker=_do_batch, fallback=_fallback)
 

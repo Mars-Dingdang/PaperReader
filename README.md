@@ -1,8 +1,8 @@
-# PaperReader v2.1.5
+# PaperReader v2.1.6
 
-[Download Windows / macOS v2.1.5](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.5) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.5.md)
+[Download Windows / macOS v2.1.6](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.6) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.6.md)
 
-v2.1.5 fixes two regressions that could abort a structured (MinerU) PDF translation right after the bilingual alignment step (a missing return value raised `'NoneType' object is not iterable`, and the Unicode sanitizer mangled the preamble's `\newunicodechar` declarations into `Invalid argument` compile errors), and adds precise LaTeX diagnostics: fatal errors are reported with source line numbers, missing glyphs with suggested replacements, OCR `\sqrt` faults are repaired automatically with an audit trail, and the translated TeX can be edited in a CodeMirror 6 editor with search & replace and line jumps from compile-error panels. Frontend/API package version: `2.1.5`.
+v2.1.6 makes PDF translation recoverable. Verified translation chunks and structured extraction are checkpointed atomically, failed jobs can resume from the earliest missing stage, and LaTeX failures are diagnosed before a bounded two-round automatic repair. The translator now protects XML-like structure tags, rejects model meta-commentary and malformed placeholders, distinguishes escaped currency dollars from real math, escapes prose safely in one pass, and maps `⋆` to `\star`. Frontend/API package version: `2.1.6`.
 
 Windows users: extract the complete ZIP and run `PaperReader.exe`. Apple Silicon Mac users: open the DMG and copy PaperReader to Applications. Both builds show the provider setup wizard on first launch. TeX Live / `latexmk` and the selected TeX engine are still required for translated PDF generation; projects without a declaration use XeLaTeX by default. See the [Windows guide](desktop/README_zh.md) and [macOS guide](desktop/README_macos_zh.md).
 
@@ -16,16 +16,17 @@ A full-stack application for bilingual paper reading:
 - Upload `.pdf`, single `.tex`, individual TeX project files, or a complete `.zip` / `.tar` / `.tar.gz` / `.tgz` LaTeX project
 - Prefer LaTeX whenever arXiv or a publisher provides source code; it produces better structure and translation quality than PDF extraction
 - Parse PDF via the [MinerU](https://mineru.net/apiManage/docs) cloud API (精准解析, Bearer token)
-- Concurrent LLM translation (Phase 优化) with placeholder protection, jittered retry and `Retry-After` honoring
+- Concurrent LLM translation with validated per-chunk checkpoints, structure-tag placeholders, targeted retry, jittered provider retry and `Retry-After` honoring
 - Optional vision-model adversarial check on each page (Qwen-class multimodal model, auto / manual review modes — Phase D; off by default for new accounts)
-- Three-layer LaTeX-failure prevention:
+- Four-layer LaTeX-failure prevention and recovery:
   1. **Prose sanitizer** rewrites raw Greek / math unicode (`ε`, `≤`, `→`, `Σ`…) into proper inline math
   2. **Force-fallback compile**: strict pass first, then `latexmk -f` so a PDF is still produced; surfaces `last_compile_warning`
-  3. **Manual editor**: pencil button on the `translated.tex` artifact opens an in-browser editor that saves and recompiles
+  3. **Bounded model repair**: compiler windows are diagnosed first, then only exact JSON patches inside those windows may be applied (maximum two rounds, with backups)
+  4. **Manual editor**: pencil button on the `translated.tex` artifact opens an in-browser editor that saves and recompiles
 - Left/center/right reading workspace with toggleable Upload / Reader / Chat regions
 - Show original and translated PDF side-by-side
 - PDF bookmarks with generated section outlines when native bookmarks are missing, faster trackpad pinch zoom, selectable/copyable text, and external links that stay outside the desktop window
-- Progress bar with stage breakdown and ETA (Phase A)
+- Progress bar with stage breakdown, ETA, persisted failure diagnosis, repair history, and a resume-from-failure button
 - Artifact panel with scrolling, hover thumbnail preview, and drag-into-PDF-pane (Phase C)
 - Chat with paper context via OpenAI-compatible API; full Markdown + GitHub-flavored tables + KaTeX math + soft line breaks for both user and assistant bubbles
 - **Light / dark theme**: persists per user account via backend settings

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -133,10 +134,24 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
                 pending_reviews_json TEXT NOT NULL DEFAULT '[]',
                 last_compile_warning TEXT,
                 translated_tex_path TEXT,
+                failure_json TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                latex_recovery_json TEXT,
                 deleted_at TEXT
             )
             """
         )
+        existing_document_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(documents)").fetchall()
+        }
+        document_migrations = {
+            "failure_json": "TEXT",
+            "retry_count": "INTEGER NOT NULL DEFAULT 0",
+            "latex_recovery_json": "TEXT",
+        }
+        for column, declaration in document_migrations.items():
+            if column not in existing_document_columns:
+                conn.execute(f"ALTER TABLE documents ADD COLUMN {column} {declaration}")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS projects (
@@ -168,6 +183,40 @@ def init_database() -> None:
     conn.row_factory = sqlite3.Row
     try:
         _initialize_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT document_id, current_stage, retry_count, stages_json
+            FROM documents WHERE status IN ('queued', 'processing', 'recovering')
+            """
+        ).fetchall()
+        for row in rows:
+            stage = row["current_stage"] or "upload"
+            try:
+                stages = json.loads(row["stages_json"] or "[]")
+            except json.JSONDecodeError:
+                stages = []
+            for entry in stages:
+                if entry.get("status") == "running":
+                    entry["status"] = "failed"
+            failure = {
+                "stage": stage,
+                "message": "The application exited before this queued or running stage completed",
+                "retryable": True,
+                "chunk": None,
+                "retry_count": int(row["retry_count"] or 0),
+            }
+            conn.execute(
+                """
+                UPDATE documents
+                SET status = 'failed', failure_json = ?, stages_json = ?, stage_started_at = NULL
+                WHERE document_id = ?
+                """,
+                (
+                    json.dumps(failure, ensure_ascii=False),
+                    json.dumps(stages, ensure_ascii=False),
+                    row["document_id"],
+                ),
+            )
         conn.commit()
     finally:
         conn.close()

@@ -3,7 +3,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from app.api.deps import get_current_user
 from app.core.config import settings
@@ -11,16 +11,21 @@ from app.models.schemas import (
     ArtifactItem,
     DocumentStatusResponse,
     DocumentSummary,
+    FailureItem,
+    LatexRecoveryItem,
     LocateCounterpartRequest,
     LocateCounterpartResponse,
     RenameDocumentRequest,
     ReferenceItem,
     ReviewProposalItem,
+    RetryDocumentResponse,
     StageItem,
 )
 from app.models.store import (
     list_documents_for_user,
+    mark_document_failed,
     normalized_source_filename,
+    queue_document_retry,
     require_document_owner,
     save_document,
     soft_delete_document,
@@ -28,10 +33,23 @@ from app.models.store import (
     translated_pdf_filename,
 )
 from app.services.alignment_service import load_alignment_entries, locate_in_alignment
-from app.services.auth_service import User
+from app.services.auth_service import User, ensure_user_settings
+from app.services.document_pipeline import process_document
 
 
 router = APIRouter()
+
+
+def _run_retry_pipeline(document_id: str, user_id: int, resume_from: str) -> None:
+    record = require_document_owner(document_id, user_id)
+    try:
+        process_document(
+            record,
+            provider_settings=ensure_user_settings(user_id),
+            resume_from=resume_from,
+        )
+    except Exception as exc:  # noqa: BLE001 - never strand the document as queued
+        mark_document_failed(document_id, resume_from or "upload", f"Retry pipeline failed to start: {exc}")
 
 
 def _alignment_blocks(text: str) -> list[str]:
@@ -131,6 +149,31 @@ def get_document(
             for p in record.pending_reviews
         ],
         last_compile_warning=record.last_compile_warning,
+        failure=FailureItem(**record.failure.__dict__) if record.failure else None,
+        latex_recovery=(
+            LatexRecoveryItem(**record.latex_recovery.__dict__)
+            if record.latex_recovery
+            else None
+        ),
+    )
+
+
+@router.post(
+    "/document/{document_id}/retry",
+    response_model=RetryDocumentResponse,
+    status_code=202,
+)
+def retry_document(
+    document_id: str,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+) -> RetryDocumentResponse:
+    record, resume_from = queue_document_retry(document_id, user.id)
+    background_tasks.add_task(_run_retry_pipeline, record.document_id, user.id, resume_from)
+    return RetryDocumentResponse(
+        document_id=record.document_id,
+        status="queued",
+        resume_from=resume_from,
     )
 
 

@@ -4,6 +4,7 @@ from app.services.latex_sanitizer import (
     repair_common_math_faults,
     sanitize_and_repair,
     sanitize_latex_body,
+    validate_latex_structure,
     validate_math_structure,
 )
 
@@ -53,6 +54,12 @@ def test_sanitize_proof_marks_to_inline_math() -> None:
     assert "□" not in out
 
 
+def test_sanitize_math_star_and_real_control_characters() -> None:
+    out, repairs = sanitize_and_repair("score ⋆ best" + chr(1) + " and more" + chr(22))
+    assert out == r"score $\star$ best and more"
+    assert any("control" in note for note in repairs)
+
+
 def test_detect_font_unsafe_chars_flags_unknown_only() -> None:
     src = "中文 ok ‘—…’ □ ε ∷"
     found = detect_font_unsafe_chars(src)
@@ -90,21 +97,79 @@ def test_repair_leaves_valid_sqrt_untouched() -> None:
     assert repairs == []
 
 
+def test_repair_invalid_math_alphabet_and_accent_nesting() -> None:
+    src = r"$\mathbf { \Delta } a + \mathrm { \bar { G i G P O } }$"
+    fixed, repairs = repair_common_math_faults(src)
+    assert r"\boldsymbol{\Delta}" in fixed
+    assert r"\overline{\mathrm{G i G P O}}" in fixed
+    assert len(repairs) == 2
+
+
 def test_validate_math_structure_reports_lines() -> None:
     doc = (
         "\\documentclass{article}\n"
         "Good line $x=1$ here.\n"
-        "Broken $unclosed math\n"
+        "Plain prose on this line.\n"
         "Braces $\\frac{a}{b}$ ok \\quad ${ x }$ ok\n"
         r"Faulty ${ \sqrt [ { k } / { a _ { n } } ] }$" + "\n"
+        "Broken $unclosed math\n"
     )
     issues = validate_math_structure(doc)
     lines = {line for line, _ in issues}
     messages = [msg for _, msg in issues]
-    assert 3 in lines  # odd '$' count
+    assert 6 in lines  # unclosed '$' at end of document
     assert 5 in lines  # malformed \sqrt survives (lint reports, does not modify)
     assert any("sqrt" in m for m in messages)
     assert 2 not in lines  # clean line stays clean
+
+
+def test_validate_latex_structure_reports_general_compile_hazards() -> None:
+    doc = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "\\section*{broken title\n"
+        "plain Big & Tall text\n"
+        "\\begin{itemize}\\item x\\end{enumerate}\n"
+        + "bad" + chr(1) + " control and ∷ glyph\n"
+        "\\end{document}\n"
+    )
+    issues = validate_latex_structure(doc)
+    messages = "\n".join(message for _, message in issues)
+    assert "unbalanced braces" in messages
+    assert "bare '&'" in messages
+    assert "environment" in messages
+    assert "control" in messages
+    assert "font-unsafe" in messages
+
+
+def test_validate_latex_structure_accepts_legal_tex_contexts() -> None:
+    doc = (
+        "\\documentclass{article}\n"
+        "\\newcommand{\\identity}[1]{#1}\n"
+        "\\begin{document}\n"
+        "Price \\$10.99 and escaped \\& are prose.\n"
+        "\\begin{tabular}{cc}a & b \\\\ c & d\\end{tabular}\n"
+        "\\begin{align}x &= y \\\\ z &= 1\\end{align}\n"
+        "$a+b$ and \\(c+d\\).\n"
+        "\\end{document}\n"
+    )
+    assert validate_latex_structure(doc) == []
+
+
+def test_validate_latex_structure_accepts_multiline_math_verbatim_and_comments() -> None:
+    doc = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "$a +\n b$ is valid multiline math.\n"
+        r"\verb|literal { & ∷ $| is opaque." + "\n"
+        "% comment with { & ∷ $ is ignored\n"
+        "\\begin{verbatim}\n"
+        "literal { & ∷ $\n"
+        "\\end{verbatim}\n"
+        "\\end{document}\n"
+    )
+
+    assert validate_latex_structure(doc) == []
 
 
 def test_sanitize_and_repair_combined() -> None:
