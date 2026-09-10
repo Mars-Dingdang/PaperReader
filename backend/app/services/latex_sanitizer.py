@@ -291,19 +291,75 @@ def repair_common_math_faults(text: str) -> tuple[str, list[str]]:
     return repaired, repairs
 
 
-def _count_unescaped(text: str, char: str) -> int:
-    count = 0
-    for offset, current in enumerate(text):
-        if current != char:
+_VERBATIM_ENVIRONMENTS = {"verbatim", "verbatim*", "lstlisting", "minted"}
+_VERBATIM_BEGIN_RE = re.compile(
+    r"\\begin\{(" + "|".join(re.escape(name) for name in _VERBATIM_ENVIRONMENTS) + r")\}"
+)
+
+
+def _mask_inline_verbatim_and_comment(line: str) -> str:
+    masked = list(line)
+    cursor = 0
+    while cursor < len(line):
+        if line[cursor] == "%" and not _is_escaped_at(line, cursor):
+            masked[cursor:] = " " * (len(line) - cursor)
+            break
+        if (
+            line.startswith(r"\verb", cursor)
+            and not _is_escaped_at(line, cursor)
+            and cursor + 5 < len(line)
+        ):
+            delimiter_offset = cursor + 5
+            if line[delimiter_offset] == "*" and delimiter_offset + 1 < len(line):
+                delimiter_offset += 1
+            delimiter = line[delimiter_offset]
+            end = line.find(delimiter, delimiter_offset + 1)
+            end = len(line) - 1 if end == -1 else end
+            masked[cursor : end + 1] = " " * (end + 1 - cursor)
+            cursor = end + 1
             continue
-        slashes = 0
-        cursor = offset - 1
-        while cursor >= 0 and text[cursor] == "\\":
-            slashes += 1
-            cursor -= 1
-        if slashes % 2 == 0:
-            count += 1
-    return count
+        cursor += 1
+    return "".join(masked)
+
+
+def _masked_tex_lines(text: str) -> list[str]:
+    """Mask comments and verbatim payload while preserving line numbers/offsets."""
+    result: list[str] = []
+    active_verbatim: str | None = None
+    # Split on "\n" only: TeX counts lines the same way, and splitlines() would
+    # additionally break on U+2028/U+2029/\x0b/\x0c inside prose, shifting the
+    # reported line numbers away from the compiler's own anchors.
+    for raw_line in text.split("\n"):
+        if active_verbatim is not None:
+            end_marker = f"\\end{{{active_verbatim}}}"
+            end = raw_line.find(end_marker)
+            if end == -1:
+                result.append(" " * len(raw_line))
+                continue
+            line = " " * end + end_marker
+            line += _mask_inline_verbatim_and_comment(raw_line[end + len(end_marker) :])
+            active_verbatim = None
+            result.append(line)
+            continue
+
+        line = _mask_inline_verbatim_and_comment(raw_line)
+        begin = _VERBATIM_BEGIN_RE.search(line)
+        if begin is not None:
+            name = begin.group(1)
+            end_marker = f"\\end{{{name}}}"
+            end = line.find(end_marker, begin.end())
+            if end == -1:
+                line = line[: begin.end()] + " " * (len(line) - begin.end())
+                active_verbatim = name
+            else:
+                line = (
+                    line[: begin.end()]
+                    + " " * (end - begin.end())
+                    + line[end : end + len(end_marker)]
+                    + " " * (len(line) - end - len(end_marker))
+                )
+        result.append(line)
+    return result
 
 
 def validate_math_structure(text: str) -> list[tuple[int, str]]:
@@ -314,25 +370,76 @@ def validate_math_structure(text: str) -> list[tuple[int, str]]:
     if not text:
         return issues
 
-    for line_no, line in enumerate(text.splitlines(), start=1):
-        if _count_unescaped(line, "$") % 2 == 1:
-            issues.append((line_no, "unbalanced '$' (odd number of unescaped '$' on the line)"))
+    masked_text = "\n".join(_masked_tex_lines(text))
+    stack: list[dict[str, int | str]] = []
+    line_no = 1
+    cursor = 0
+    delimiter_pairs = {r"\(": r"\)", r"\[": r"\]"}
+    closing_delimiters = {value: key for key, value in delimiter_pairs.items()}
+    while cursor < len(masked_text):
+        if masked_text[cursor] == "\n":
+            line_no += 1
+            cursor += 1
+            continue
+        token = None
+        is_open = False
+        is_close = False
+        if masked_text[cursor] == "$" and not _is_escaped_at(masked_text, cursor):
+            if stack and stack[-1]["token"] == "$":
+                token = "$"
+                is_close = True
+            else:
+                token = "$$" if masked_text.startswith("$$", cursor) else "$"
+            if stack and stack[-1]["token"] == token:
+                is_close = True
+            elif not stack:
+                is_open = True
+            else:
+                issues.append((line_no, f"math delimiter {token!r} is nested or mismatched"))
+        else:
+            for candidate in (*delimiter_pairs, *closing_delimiters):
+                if masked_text.startswith(candidate, cursor) and not _is_escaped_at(masked_text, cursor):
+                    token = candidate
+                    is_open = candidate in delimiter_pairs
+                    is_close = candidate in closing_delimiters
+                    break
+        if token is not None:
+            if is_open:
+                if stack:
+                    issues.append((line_no, f"math delimiter {token!r} is nested or mismatched"))
+                else:
+                    stack.append({"token": token, "line": line_no, "brace_depth": 0})
+            elif is_close:
+                expected_open = closing_delimiters.get(token, token)
+                if not stack or stack[-1]["token"] != expected_open:
+                    issues.append((line_no, f"math delimiter {token!r} has no matching opener"))
+                else:
+                    opened = stack.pop()
+                    depth = int(opened["brace_depth"])
+                    if depth:
+                        issues.append((
+                            int(opened["line"]),
+                            f"unbalanced braces in math region (depth {depth:+d})",
+                        ))
+            cursor += len(token)
+            continue
+        if stack and masked_text[cursor] in "{}" and not _is_escaped_at(masked_text, cursor):
+            stack[-1]["brace_depth"] = int(stack[-1]["brace_depth"]) + (
+                1 if masked_text[cursor] == "{" else -1
+            )
+        cursor += 1
 
-    for match in _MATH_REGION_RE.finditer(text):
-        segment = match.group(0)
-        depth = _count_unescaped(segment, "{") - _count_unescaped(segment, "}")
-        if depth != 0:
-            issues.append((
-                _line_of(text, match.start()),
-                f"unbalanced braces in math region (depth {depth:+d}): {segment[:60]!r}",
-            ))
+    for opened in stack:
+        token = str(opened["token"])
+        label = "unbalanced '$'" if token in {"$", "$$"} else f"unbalanced {token!r}"
+        issues.append((int(opened["line"]), f"{label} (opening delimiter is not closed)"))
 
     for pattern, hint in (
         (_SQRT_FAULT_A_RE, "\\sqrt root index contains '/' and the mandatory radicand is missing"),
         (_SQRT_FAULT_B_RE, "\\sqrt root index is never closed with ']' and the radicand is missing"),
     ):
-        for match in pattern.finditer(text):
-            issues.append((_line_of(text, match.start()), hint))
+        for match in pattern.finditer(masked_text):
+            issues.append((_line_of(masked_text, match.start()), hint))
 
     return issues
 
@@ -354,13 +461,6 @@ def _is_escaped_at(text: str, offset: int) -> bool:
     return slashes % 2 == 1
 
 
-def _without_comment(line: str) -> str:
-    for offset, ch in enumerate(line):
-        if ch == "%" and not _is_escaped_at(line, offset):
-            return line[:offset]
-    return line
-
-
 def validate_latex_structure(text: str) -> list[tuple[int, str]]:
     """Conservative preflight for hazards outside the existing math lint.
 
@@ -374,8 +474,13 @@ def validate_latex_structure(text: str) -> list[tuple[int, str]]:
     environment_stack: list[tuple[str, int]] = []
     brace_stack: list[int] = []
 
-    for line_no, raw_line in enumerate(text.splitlines(), start=1):
-        line = _without_comment(raw_line)
+    masked_lines = _masked_tex_lines(text)
+    for line_no, (raw_line, line) in enumerate(
+        zip(text.split("\n"), masked_lines), start=1
+    ):
+        for ch in raw_line:
+            if ord(ch) < 32 and ch not in "\n\r\t":
+                issues.append((line_no, f"unsafe C0 control character U+{ord(ch):04X}"))
         events = {match.start(): match for match in _ENV_TOKEN_RE.finditer(line)}
         cursor = 0
         while cursor < len(line):
@@ -407,11 +512,9 @@ def validate_latex_structure(text: str) -> list[tuple[int, str]]:
             elif ch == "&" and not escaped:
                 if not any(name in _ALIGNMENT_ENVIRONMENTS for name, _ in environment_stack):
                     issues.append((line_no, "bare '&' outside an alignment/table environment"))
-            if ord(ch) < 32 and ch not in "\n\r\t":
-                issues.append((line_no, f"unsafe C0 control character U+{ord(ch):04X}"))
             cursor += 1
 
-        for ch in raw_line:
+        for ch in line:
             if ord(ch) >= 32 and not _is_font_safe_char(ch):
                 issues.append((line_no, f"font-unsafe character {ch!r} (U+{ord(ch):04X})"))
 

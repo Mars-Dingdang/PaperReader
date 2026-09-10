@@ -27,6 +27,7 @@ def test_arxiv_readme_declared_compiler_is_used(tmp_path, monkeypatch):
     latex_service._run_latexmk(tex, tmp_path, force=False)
 
     assert captured[0][1] == "-pdf"
+    assert "-no-shell-escape" in captured[0]
     assert "-xelatex" not in captured[0]
 
 
@@ -226,6 +227,26 @@ Missing character: There is no □ (U+25A1) in font [lmroman12-regular]:mapping=
 """
 
 
+def test_parse_latex_log_supports_file_line_error_format(tmp_path):
+    log_path = tmp_path / "translated.log"
+    log_path.write_text(
+        "C:/work/translated.tex:610: Paragraph ended before \\@ssect was complete.\n"
+        "l.610\n"
+        "C:/work/translated.tex:637: Too many }'s.\n"
+        "C:/work/translated.tex:773: Misplaced alignment tab character &.\n",
+        encoding="utf-8",
+    )
+
+    errors, missing = latex_service.parse_latex_log_issues(log_path)
+
+    assert [(item["line"], item["message"]) for item in errors] == [
+        (610, "Paragraph ended before \\@ssect was complete."),
+        (637, "Too many }'s."),
+        (773, "Misplaced alignment tab character &."),
+    ]
+    assert missing == []
+
+
 def test_parse_latex_log_issues_extracts_errors_and_missing_chars(tmp_path):
     log = tmp_path / "paper.log"
     log.write_text(_SAMPLE_LOG, encoding="utf-8")
@@ -307,3 +328,35 @@ def test_create_translated_tex_returns_sqrt_repairs(tmp_path):
     content = tex_path.read_text(encoding="utf-8")
     assert repairs and repairs[0].startswith("L1:")
     assert r"\sqrt[{ k }]{{ A }}}" in content
+
+
+def test_parse_latex_log_filters_planted_file_line_anchors_by_tex_name(tmp_path):
+    # TeX logs echo source text verbatim, so a document can plant lines shaped
+    # like "file.tex:N:" inside its own content. Anchors must only be accepted
+    # for the file that was actually compiled.
+    log = tmp_path / "translated.log"
+    log.write_text(
+        "evil.tex:150: planted anchor\n"
+        "./translated.tex:722: Misplaced alignment tab character &.\n",
+        encoding="utf-8",
+    )
+
+    unfiltered_errors, _ = latex_service.parse_latex_log_issues(log)
+    assert {e["line"] for e in unfiltered_errors} == {150, 722}
+
+    filtered_errors, _ = latex_service.parse_latex_log_issues(log, tex_name="translated.tex")
+    assert {e["line"] for e in filtered_errors} == {722}
+
+    spoofed_name_errors, _ = latex_service.parse_latex_log_issues(
+        log, tex_name="main.tex"
+    )
+    assert spoofed_name_errors == []
+
+
+def test_parse_latex_log_rejects_absurd_line_numbers(tmp_path):
+    log = tmp_path / "translated.log"
+    log.write_text("translated.tex:999999999: planted far anchor\n", encoding="utf-8")
+
+    errors, _ = latex_service.parse_latex_log_issues(log, tex_name="translated.tex")
+
+    assert errors == []

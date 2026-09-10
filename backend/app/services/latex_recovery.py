@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
-import shutil
+from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,12 +24,22 @@ from app.services.llm_client import llm_client
 _MAX_CONTEXT_CHARS = 72_000
 _ERROR_WINDOW_RADIUS = 20
 _DANGEROUS_COMMAND_RE = re.compile(
-    r"\\(?:input|include|write18|usepackage|RequirePackage|documentclass|openout|read|catcode)\b",
+    r"\\(?:input|include|InputIfFileExists|verbatiminput|lstinputlisting|import|subimport|"
+    r"write18|usepackage|RequirePackage|documentclass|openin|openout|read|readline|catcode)\b",
     re.IGNORECASE,
 )
 _FILE_PATH_RE = re.compile(
-    r"(?:\b[A-Za-z]:[\\/][^{}\s]+|(?<!\w)\.\.?[\\/][^{}\s]+|(?<!\w)/(?:[\w.-]+/)+[\w.-]+)"
+    r"(?:\b[A-Za-z]:[\\/][^{}\s]+|(?<!\w)\.\.?[\\/][^{}\s]+|"
+    r"(?<!\w)/(?:[\w.-]+/)+[\w.-]+|(?<![\w.])\.env\b|"
+    r"\b[\w.-]+\.(?:tex|sty|cls|bib|bst|cfg|def|fd|map|enc|pdf|png|jpe?g|eps|svg|txt|dat|csv|json|ya?ml)\b)",
+    re.IGNORECASE,
 )
+_CONTROL_SEQUENCE_RE = re.compile(r"\\(?:[A-Za-z@]+|[^\s])")
+_SAFE_NEW_CONTROL_SEQUENCES = {
+    r"\&", r"\%", r"\#", r"\_", r"\$", r"\{", r"\}", r"\\",
+    r"\end", r"\right", r"\)", r"\]", r"\star", r"\boldsymbol",
+    r"\overline", r"\widehat", r"\widetilde",
+}
 _MAX_PATCHED_SOURCE_LINES = 64
 _MAX_PATCHED_REPLACEMENT_LINES = 72
 
@@ -67,15 +78,27 @@ def _json_object(raw: str) -> dict:
     return value
 
 
-def _allowed_lines(log_path: Path, tex: str) -> set[int]:
-    errors, _ = parse_latex_log_issues(log_path)
+def _tex_total_lines(tex: str) -> int:
+    """Line count with TeX semantics: lines are delimited by ``\\n`` only."""
+    lines = tex.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return max(1, len(lines))
+
+
+def _allowed_lines(log_path: Path, tex: str, tex_name: str | None = None) -> set[int]:
+    errors, _ = parse_latex_log_issues(log_path, tex_name=tex_name)
+    total = _tex_total_lines(tex)
     anchors = {
         int(error["line"])
         for error in errors
-        if isinstance(error.get("line"), int) and int(error["line"]) > 0
+        if isinstance(error.get("line"), int) and 0 < int(error["line"]) <= total
     }
-    anchors.update(line for line, _ in validate_latex_structure(tex))
-    total = max(1, len(tex.splitlines()))
+    anchors.update(
+        line
+        for line, _ in validate_latex_structure(tex)
+        if isinstance(line, int) and 0 < line <= total
+    )
     allowed: set[int] = set()
     for anchor in anchors:
         allowed.update(
@@ -88,11 +111,11 @@ def _issue_context(tex_path: Path, log_path: Path, allowed: set[int]) -> str:
     tex = tex_path.read_text(encoding="utf-8", errors="replace")
     log = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
     if len(tex) + len(log) <= _MAX_CONTEXT_CHARS:
-        numbered = "\n".join(f"{index:06d}: {line}" for index, line in enumerate(tex.splitlines(), 1))
+        numbered = "\n".join(f"{index:06d}: {line}" for index, line in enumerate(tex.split("\n"), 1))
         return f"<compiler-log>\n{log}\n</compiler-log>\n<translated-tex>\n{numbered}\n</translated-tex>"
 
     errors, missing = parse_latex_log_issues(log_path)
-    tex_lines = tex.splitlines()
+    tex_lines = tex.split("\n")
     windows = [
         f"{line:06d}: {tex_lines[line - 1]}"
         for line in sorted(allowed)
@@ -128,7 +151,12 @@ def _validate_and_apply_patches(
         original_text = original_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("translated.tex is not valid UTF-8") from exc
-    lines = original_text.splitlines(keepends=True)
+    # Line accounting must match the compiler: split on "\n" only, so exotic
+    # Unicode line separators inside prose cannot shift validator line numbers
+    # away from the engine's `l.<n>` anchors. CRLF files keep the "\r" as part
+    # of each element, preserving bytes through the join below.
+    lines = original_text.split("\n")
+    total_lines = _tex_total_lines(original_text)
     begin_document = next(
         (index for index, line in enumerate(lines, 1) if "\\begin{document}" in line),
         len(lines) + 1,
@@ -145,7 +173,7 @@ def _validate_and_apply_patches(
             after = str(item["replacement"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("patch is missing a valid line range or text") from exc
-        if start < begin_document or end < start or end > len(lines):
+        if start < begin_document or end < start or end > total_lines:
             raise ValueError("patch is outside the document body")
         if any(line not in allowed for line in range(start, end + 1)):
             raise ValueError("patch is outside compiler-located error windows")
@@ -154,6 +182,15 @@ def _validate_and_apply_patches(
         new_paths = set(_FILE_PATH_RE.findall(after)) - set(_FILE_PATH_RE.findall(before))
         if new_paths:
             raise ValueError("proposed patch introduces a file path")
+        before_commands = Counter(_CONTROL_SEQUENCE_RE.findall(before))
+        after_commands = Counter(_CONTROL_SEQUENCE_RE.findall(after))
+        introduced_commands = {
+            command
+            for command, count in after_commands.items()
+            if count > before_commands[command] and command not in _SAFE_NEW_CONTROL_SEQUENCES
+        }
+        if introduced_commands:
+            raise ValueError("proposed patch introduces a control sequence")
         actual = "\n".join(_line_body(line) for line in lines[start - 1 : end])
         if actual != before:
             raise ValueError("patch original text was not found at the declared line range")
@@ -184,19 +221,41 @@ def _validate_and_apply_patches(
     backup_root.mkdir(parents=True, exist_ok=True)
     backup_stem = tex_path.stem.lstrip("_") or tex_path.stem
     backup = backup_root / f"{backup_stem}.before-repair-{round_number}{tex_path.suffix}"
-    shutil.copy2(tex_path, backup)
+    suffix = 2
+    while True:
+        try:
+            with backup.open("xb") as backup_file:
+                backup_file.write(original_bytes)
+            break
+        except FileExistsError:
+            backup = backup_root / (
+                f"{backup_stem}.before-repair-{round_number}-{suffix}{tex_path.suffix}"
+            )
+            suffix += 1
     for item in sorted(normalized, key=lambda value: value["start_line"], reverse=True):
         start, end = item["start_line"], item["end_line"]
         old_slice = lines[start - 1 : end]
-        newline = "\r\n" if any(line.endswith("\r\n") for line in old_slice) else "\n"
+        # In "\n"-split form the separator is implicit in the final join, so a
+        # CRLF line only carries a trailing "\r" on the element itself.
+        newline = "\r" if any(line.endswith("\r") for line in old_slice) else ""
         replacement_lines = item["replacement"].split("\n")
         rendered = [part + newline for part in replacement_lines]
-        if old_slice and not old_slice[-1].endswith(("\n", "\r")):
-            rendered[-1] = rendered[-1].rstrip("\r\n")
+        # Only a patch ending on the final line of a file without a trailing
+        # newline must drop the line terminator entirely.
+        if end == total_lines and not original_text.endswith(("\n", "\r")):
+            rendered[-1] = rendered[-1].rstrip("\r")
         lines[start - 1 : end] = rendered
         item["backup"] = str(backup)
         item["round"] = round_number
-    tex_path.write_bytes("".join(lines).encode("utf-8"))
+    temporary = tex_path.with_name(f".{tex_path.name}.{os.getpid()}.{round_number}.tmp")
+    try:
+        with temporary.open("wb") as output:
+            output.write("\n".join(lines).encode("utf-8"))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, tex_path)
+    finally:
+        temporary.unlink(missing_ok=True)
     return normalized
 
 
@@ -215,7 +274,7 @@ def recover_latex_document(
     for round_number in range(1, max_rounds + 1):
         try:
             tex = tex_path.read_text(encoding="utf-8", errors="replace")
-            allowed = _allowed_lines(log_path, tex)
+            allowed = _allowed_lines(log_path, tex, tex_name=tex_path.name)
             if not allowed:
                 raise ValueError("compiler did not identify any safe repair window")
             context = _issue_context(tex_path, log_path, allowed)
@@ -276,6 +335,9 @@ def recover_latex_document(
                 )
             except Exception as exc:  # a later round may repair the remaining error
                 report.last_error = str(exc)
+                continue
+            if result.warning or result.errors or result.missing_chars:
+                report.last_error = result.warning or "LaTeX log still contains errors or missing glyphs"
                 continue
             report.status = "succeeded"
             report.last_error = None

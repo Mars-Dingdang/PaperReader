@@ -23,6 +23,7 @@ from app.models.schemas import (
 )
 from app.models.store import (
     list_documents_for_user,
+    mark_document_failed,
     normalized_source_filename,
     queue_document_retry,
     require_document_owner,
@@ -41,11 +42,14 @@ router = APIRouter()
 
 def _run_retry_pipeline(document_id: str, user_id: int, resume_from: str) -> None:
     record = require_document_owner(document_id, user_id)
-    process_document(
-        record,
-        provider_settings=ensure_user_settings(user_id),
-        resume_from=resume_from,
-    )
+    try:
+        process_document(
+            record,
+            provider_settings=ensure_user_settings(user_id),
+            resume_from=resume_from,
+        )
+    except Exception as exc:  # noqa: BLE001 - never strand the document as queued
+        mark_document_failed(document_id, resume_from or "upload", f"Retry pipeline failed to start: {exc}")
 
 
 def _alignment_blocks(text: str) -> list[str]:

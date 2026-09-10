@@ -109,14 +109,15 @@ def test_validate_math_structure_reports_lines() -> None:
     doc = (
         "\\documentclass{article}\n"
         "Good line $x=1$ here.\n"
-        "Broken $unclosed math\n"
+        "Plain prose on this line.\n"
         "Braces $\\frac{a}{b}$ ok \\quad ${ x }$ ok\n"
         r"Faulty ${ \sqrt [ { k } / { a _ { n } } ] }$" + "\n"
+        "Broken $unclosed math\n"
     )
     issues = validate_math_structure(doc)
     lines = {line for line, _ in issues}
     messages = [msg for _, msg in issues]
-    assert 3 in lines  # odd '$' count
+    assert 6 in lines  # unclosed '$' at end of document
     assert 5 in lines  # malformed \sqrt survives (lint reports, does not modify)
     assert any("sqrt" in m for m in messages)
     assert 2 not in lines  # clean line stays clean
@@ -152,6 +153,22 @@ def test_validate_latex_structure_accepts_legal_tex_contexts() -> None:
         "$a+b$ and \\(c+d\\).\n"
         "\\end{document}\n"
     )
+    assert validate_latex_structure(doc) == []
+
+
+def test_validate_latex_structure_accepts_multiline_math_verbatim_and_comments() -> None:
+    doc = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "$a +\n b$ is valid multiline math.\n"
+        r"\verb|literal { & ∷ $| is opaque." + "\n"
+        "% comment with { & ∷ $ is ignored\n"
+        "\\begin{verbatim}\n"
+        "literal { & ∷ $\n"
+        "\\end{verbatim}\n"
+        "\\end{document}\n"
+    )
+
     assert validate_latex_structure(doc) == []
 
 

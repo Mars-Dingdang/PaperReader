@@ -1,7 +1,9 @@
 import copy
+from pathlib import Path
 
 from app.models.store import LatexRecoveryEntry
-from app.services import latex_recovery
+from app.models import store
+from app.services import document_pipeline, latex_recovery
 from app.services.latex_service import LatexCompileResult
 
 
@@ -115,6 +117,67 @@ def test_recovery_rejects_new_file_paths_without_writing(tmp_path, monkeypatch):
     assert not (tmp_path / "translated.before-repair-1.tex").exists()
 
 
+def test_recovery_rejects_new_file_io_command_and_bare_filename(tmp_path):
+    tex_path = tmp_path / "translated.tex"
+    tex_path.write_text(_fixture_tex(), encoding="utf-8")
+
+    for replacement, expected in (
+        (r"\InputIfFileExists{secret.tex}{}{}", "unsafe latex"),
+        ("Read secret.tex", "file path"),
+    ):
+        payload = {
+            "patches": [{
+                "start_line": 5,
+                "end_line": 5,
+                "original": "Big & Tall",
+                "replacement": replacement,
+                "reason": "unsafe",
+            }]
+        }
+        try:
+            latex_recovery._validate_and_apply_patches(tex_path, payload, {5}, 1)
+        except ValueError as exc:
+            assert expected in str(exc).lower()
+        else:
+            raise AssertionError("unsafe patch must be rejected")
+
+
+def test_repair_write_is_atomic_and_existing_backup_is_not_overwritten(tmp_path, monkeypatch):
+    tex_path = tmp_path / "translated.tex"
+    tex_path.write_text(_fixture_tex(), encoding="utf-8")
+    original = tex_path.read_bytes()
+    old_backup = tmp_path / "translated.before-repair-1.tex"
+    old_backup.write_bytes(b"immutable older recovery")
+    replace_calls: list[tuple[Path, Path]] = []
+    real_replace = latex_recovery.os.replace
+
+    def observed_replace(source, target):
+        replace_calls.append((Path(source), Path(target)))
+        real_replace(source, target)
+
+    monkeypatch.setattr(latex_recovery.os, "replace", observed_replace)
+    changes = latex_recovery._validate_and_apply_patches(
+        tex_path,
+        {
+            "patches": [{
+                "start_line": 5,
+                "end_line": 5,
+                "original": "Big & Tall",
+                "replacement": r"Big \& Tall",
+                "reason": "escape",
+            }]
+        },
+        {5},
+        1,
+    )
+
+    assert replace_calls and replace_calls[-1][1] == tex_path
+    assert old_backup.read_bytes() == b"immutable older recovery"
+    new_backup = Path(changes[0]["backup"])
+    assert new_backup != old_backup
+    assert new_backup.read_bytes() == original
+
+
 def test_patch_validator_rejects_whole_document_rewrite(tmp_path):
     tex_path = tmp_path / "translated.tex"
     lines = ["\\begin{document}"] + [f"line {index}" for index in range(1, 70)] + ["\\end{document}"]
@@ -168,3 +231,166 @@ def test_recovery_stops_after_two_rounds(tmp_path, monkeypatch):
     assert outcome.report.rounds == 2
     assert (tmp_path / "translated.before-repair-1.tex").exists()
     assert (tmp_path / "translated.before-repair-2.tex").exists()
+
+
+def test_pipeline_treats_lenient_or_missing_glyph_result_as_recovery_input(
+    isolated_storage, monkeypatch
+):
+    source = isolated_storage / "source.pdf"
+    source.write_bytes(b"pdf")
+    record = store.DocumentRecord("strict-gate", 1, "pdf", source)
+    tex_path = isolated_storage / "translated.tex"
+    tex_path.write_text(_fixture_tex().replace("Big & Tall", "Safe text"), encoding="utf-8")
+    lenient_pdf = isolated_storage / "lenient.pdf"
+    lenient_pdf.write_bytes(b"pdf")
+    recovered_pdf = isolated_storage / "recovered.pdf"
+    recovered_pdf.write_bytes(b"pdf")
+
+    monkeypatch.setattr(
+        document_pipeline,
+        "compile_tex_project_with_fallback",
+        lambda *a, **k: LatexCompileResult(
+            lenient_pdf,
+            warning="strict compile failed",
+            errors=[{"line": 3, "message": "strict error"}],
+        ),
+    )
+    recovery_calls: list[int] = []
+
+    def recover(*args, **kwargs):
+        recovery_calls.append(1)
+        return latex_recovery.LatexRecoveryOutcome(
+            LatexCompileResult(recovered_pdf),
+            LatexRecoveryEntry(status="succeeded", diagnosis="fixed", rounds=1),
+        )
+
+    monkeypatch.setattr(document_pipeline, "recover_latex_document", recover)
+
+    result = document_pipeline._compile_translated_tex(
+        record, tex_path, isolated_storage, provider_settings=None
+    )
+
+    assert result.pdf_path == recovered_pdf
+    assert recovery_calls == [1]
+
+
+def test_clean_recompile_clears_stale_recovery_failure(isolated_storage, monkeypatch):
+    source = isolated_storage / "source.pdf"
+    source.write_bytes(b"pdf")
+    record = store.DocumentRecord(
+        "stale-recovery",
+        1,
+        "pdf",
+        source,
+        latex_recovery=LatexRecoveryEntry(
+            status="failed", diagnosis="old failure", last_error="old error"
+        ),
+    )
+    tex_path = isolated_storage / "translated.tex"
+    tex_path.write_text(_fixture_tex().replace("Big & Tall", "Safe text"), encoding="utf-8")
+    pdf = isolated_storage / "translated.pdf"
+    pdf.write_bytes(b"pdf")
+    monkeypatch.setattr(
+        document_pipeline,
+        "compile_tex_project_with_fallback",
+        lambda *a, **k: LatexCompileResult(pdf),
+    )
+
+    document_pipeline._compile_translated_tex(
+        record, tex_path, isolated_storage, provider_settings=None
+    )
+
+    assert record.latex_recovery is not None
+    assert record.latex_recovery.status == "succeeded"
+    assert record.latex_recovery.last_error is None
+
+
+def test_allowed_lines_ignore_spoofed_foreign_file_anchors(tmp_path):
+    tex_lines = ["\\documentclass{article}", "\\begin{document}"]
+    tex_lines += [f"safe prose {index}" for index in range(3, 55)]
+    tex_lines += ["Big & Tall", "safe after.", "\\end{document}"]
+    tex = "\n".join(tex_lines) + "\n"
+    tex_path = tmp_path / "translated.tex"
+    tex_path.write_text(tex, encoding="utf-8")
+    log_path = tmp_path / "translated.log"
+    # A planted foreign-file anchor at line 5 would open a window far from the
+    # real error at line 55.
+    log_path.write_text(
+        "evil.tex:5: planted anchor\n! Misplaced alignment tab character &.\nl.55 Big & Tall\n",
+        encoding="utf-8",
+    )
+
+    allowed = latex_recovery._allowed_lines(log_path, tex, tex_name="translated.tex")
+
+    assert 20 not in allowed  # inside 5 +/- 20 when the decoy anchor counts
+    assert 40 in allowed  # inside the genuine 55 +/- 20 window
+
+
+def test_patch_line_accounting_ignores_unicode_line_separators(tmp_path):
+    # U+2028 inside prose is one character, not a line break: TeX numbers lines
+    # by "\n" only and the validator must agree, or patches land on shifted
+    # lines and the whole document drifts.
+    tex = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "price \u2028 ten\n"
+        "Big & Tall\n"
+        "safe after.\n"
+        "\\end{document}\n"
+    )
+    tex_path = tmp_path / "translated.tex"
+    tex_path.write_text(tex, encoding="utf-8", newline="")
+    original_bytes = tex_path.read_bytes()
+
+    changes = latex_recovery._validate_and_apply_patches(
+        tex_path,
+        {
+            "patches": [
+                {
+                    "start_line": 4,
+                    "end_line": 4,
+                    "original": "Big & Tall",
+                    "replacement": "Big \\& Tall",
+                    "reason": "escape prose ampersand",
+                }
+            ]
+        },
+        allowed={4},
+        round_number=1,
+    )
+
+    assert changes and changes[0]["start_line"] == 4
+    updated_bytes = tex_path.read_bytes()
+    assert b"Big \\& Tall" in updated_bytes
+    assert "\u2028".encode("utf-8") in updated_bytes
+    # Every other line stays byte-identical.
+    original_lines = original_bytes.decode("utf-8").split("\n")
+    updated_lines = updated_bytes.decode("utf-8").split("\n")
+    assert updated_lines[:3] == original_lines[:3]
+    assert updated_lines[4:] == original_lines[4:]
+
+
+def test_patch_write_preserves_crlf_endings(tmp_path):
+    tex = "\\documentclass{article}\r\n\\begin{document}\r\nBig & Tall\r\n\\end{document}\r\n"
+    tex_path = tmp_path / "translated.tex"
+    tex_path.write_bytes(tex.encode("utf-8"))
+    original = tex_path.read_bytes()
+
+    latex_recovery._validate_and_apply_patches(
+        tex_path,
+        {
+            "patches": [
+                {
+                    "start_line": 3,
+                    "end_line": 3,
+                    "original": "Big & Tall",
+                    "replacement": "Big \\& Tall",
+                    "reason": "escape prose ampersand",
+                }
+            ]
+        },
+        allowed={3},
+        round_number=1,
+    )
+
+    assert tex_path.read_bytes() == original.replace(b"Big & Tall", b"Big \\& Tall")

@@ -434,7 +434,7 @@ def require_document_owner(document_id: str, owner_user_id: int) -> DocumentReco
 
 
 def queue_document_retry(document_id: str, owner_user_id: int) -> tuple[DocumentRecord, str]:
-    """Atomically claim one failed document for retry within this app process."""
+    """Claim one failed document using a process lock plus SQLite compare-and-set."""
     with _RETRY_LOCK:
         record = require_document_owner(document_id, owner_user_id)
         if record.status != "failed":
@@ -450,6 +450,20 @@ def queue_document_retry(document_id: str, owner_user_id: int) -> tuple[Document
             )
         else:
             resume_from = failed_stage
+        with db_cursor() as conn:
+            claimed = conn.execute(
+                """
+                UPDATE documents
+                SET status = 'queued', retry_count = retry_count + 1
+                WHERE document_id = ? AND owner_user_id = ? AND status = 'failed'
+                """,
+                (document_id, owner_user_id),
+            )
+            if claimed.rowcount != 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Document retry was already claimed",
+                )
         record.retry_count += 1
         if record.failure:
             record.failure.retry_count = record.retry_count
@@ -457,6 +471,30 @@ def queue_document_retry(document_id: str, owner_user_id: int) -> tuple[Document
         record.logs.append(f"Retry {record.retry_count} queued from stage: {resume_from}")
         save_document(record)
         return record, resume_from
+
+
+def mark_document_failed(document_id: str, stage: str, message: str) -> None:
+    """Fail a queued/processing document that never reached the pipeline's own
+    error handling (e.g. the background task died while loading settings).
+
+    Leaves records in any other status untouched so completed or already
+    failed documents keep their state.
+    """
+    record = DOCUMENTS.get(document_id)
+    if record is None or record.status not in {"queued", "processing", "recovering"}:
+        return
+    record.status = "failed"
+    record.failure = FailureEntry(
+        stage=stage,
+        message=message,
+        retryable=record.source_path.is_file(),
+        retry_count=record.retry_count,
+    )
+    record.logs.append(f"Error: {message}")
+    try:
+        save_document(record)
+    except Exception:  # noqa: BLE001 - best effort; startup heal covers restarts
+        pass
 
 
 def require_project_owner(project_id: str, owner_user_id: int) -> ProjectRecord:

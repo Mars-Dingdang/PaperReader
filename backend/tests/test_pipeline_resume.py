@@ -1,3 +1,7 @@
+import json
+
+import pytest
+
 from app.core.config import settings
 from app.models import store
 from app.services import document_pipeline
@@ -71,6 +75,55 @@ def test_translation_retry_reuses_parse_checkpoint_and_finishes(isolated_storage
     assert len(parse_calls) == 1
     assert second.translated_tex_path is not None
     assert second.translated_tex_path.is_file()
+
+
+def test_clean_retry_reuses_extraction_checkpoint(isolated_storage, monkeypatch):
+    source = settings.upload_dir / "clean-resume.pdf"
+    source.write_bytes(b"pdf")
+    record = document_pipeline.create_document_record(source, "pdf", owner_user_id=1)
+    parse_calls: list[int] = []
+
+    def extract_once(*args, **kwargs):
+        parse_calls.append(1)
+        return _structured_result(isolated_storage)
+
+    real_clean = document_pipeline._clean_nougat_text_with_metadata
+    monkeypatch.setattr(document_pipeline, "extract_structured_from_pdf_local", extract_once)
+    monkeypatch.setattr(document_pipeline, "extract_text_from_pdf_text_layer", lambda *a, **k: "")
+    monkeypatch.setattr(
+        document_pipeline,
+        "_clean_nougat_text_with_metadata",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("clean stage failed")),
+    )
+
+    first = document_pipeline.process_document(record)
+    assert first.status == "failed"
+    assert first.failure is not None
+    assert first.failure.stage == "clean"
+
+    monkeypatch.setattr(
+        document_pipeline,
+        "extract_structured_from_pdf_local",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not parse again")),
+    )
+    monkeypatch.setattr(document_pipeline, "_clean_nougat_text_with_metadata", real_clean)
+
+    def translate_ok(ir, **kwargs):
+        apply_translations(ir, [f"译-{index}" for index, _ in enumerate(collect_translatable_strings(ir))])
+
+    def compile_ok(path, output_dir, compiler=None):
+        pdf = output_dir / "translated.pdf"
+        pdf.write_bytes(b"pdf")
+        return LatexCompileResult(pdf)
+
+    monkeypatch.setattr(document_pipeline, "translate_ir", translate_ok)
+    monkeypatch.setattr(document_pipeline, "compile_tex_project_with_fallback", compile_ok)
+
+    second = document_pipeline.process_document(first, resume_from="clean")
+
+    assert second.status == "done", second.logs
+    assert second.failure is None
+    assert parse_calls == [1]
 
 
 def test_latex_retry_reuses_registered_translated_tex(isolated_storage, monkeypatch):
@@ -163,3 +216,15 @@ def test_tex_project_latex_retry_reuses_registered_translated_tex(
 
     assert result.status == "done"
     assert result.failure is None
+
+
+@pytest.mark.parametrize("payload", [None, [], "text", 1])
+def test_extraction_checkpoint_ignores_non_object_json(
+    isolated_storage, tmp_path, payload
+):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"pdf")
+    checkpoint = tmp_path / "extraction-checkpoint.json"
+    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert document_pipeline._load_extraction_checkpoint(checkpoint, source) is None

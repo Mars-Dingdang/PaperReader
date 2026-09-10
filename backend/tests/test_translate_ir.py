@@ -187,6 +187,84 @@ def test_translate_ir_reuses_verified_checkpoint_across_provider_changes(tmp_pat
     assert len(calls) == 1
 
 
+def test_translate_ir_reuses_checkpoint_with_structural_placeholders(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "translation-checkpoint.json"
+    source = "<think>Reason about $x$ at https://example.com</think>"
+
+    def fake_chat(message, system_prompt, **kwargs):
+        return message.replace("Reason about", "推理")
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", fake_chat)
+    first = [Paragraph(runs=[TextRun(text=source)])]
+    translate_service.translate_ir(first, checkpoint_path=checkpoint)
+    assert first[0].runs[0].text == "<think>推理 $x$ at https://example.com</think>"
+
+    monkeypatch.setattr(
+        translate_service.llm_client,
+        "chat",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("checkpoint must be reused")),
+    )
+    second = [Paragraph(runs=[TextRun(text=source)])]
+    translate_service.translate_ir(second, checkpoint_path=checkpoint)
+    assert second[0].runs[0].text == first[0].runs[0].text
+
+
+def test_translate_ir_checkpoints_siblings_before_later_chunk_fails(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "translation-checkpoint.json"
+    calls: list[str] = []
+
+    def fake_chat(message, system_prompt, **kwargs):
+        calls.append(message)
+        if "@@SEG@@" in message:
+            return "malformed batch response"
+        if message == "First":
+            return "第一"
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", fake_chat)
+    ir = [Paragraph(runs=[TextRun(text="First"), TextRun(text="Second")])]
+
+    with pytest.raises(RuntimeError, match=r"chunk 2\b"):
+        translate_service.translate_ir(ir, checkpoint_path=checkpoint)
+
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert payload["segments"][translate_service._checkpoint_key("First")] == "第一"
+    assert translate_service._checkpoint_key("Second") not in payload["segments"]
+
+
+def test_translate_output_with_extra_structural_tag_is_retried(monkeypatch):
+    calls: list[str] = []
+
+    def fake_chat(message, system_prompt, **kwargs):
+        calls.append(message)
+        return "<think>model reasoning</think>" if len(calls) == 1 else "安全译文"
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", fake_chat)
+    ir = [Paragraph(runs=[TextRun(text="Source prose")])]
+
+    translate_service.translate_ir(ir)
+
+    assert ir[0].runs[0].text == "安全译文"
+    assert len(calls) == 2
+
+
+def test_placeholder_generation_does_not_collide_with_source_text():
+    source = "literal __PR_PH_0000__ then <think>"
+    protected, mapping = translate_service.protect_placeholders(source)
+
+    assert "__PR_PH_0000__" in protected
+    assert "__PR_PH_0000__" not in mapping
+    assert translate_service.restore_placeholders(protected, mapping) == source
+
+
+@pytest.mark.parametrize("payload", [None, [], "text", 1])
+def test_translation_checkpoint_ignores_non_object_json(tmp_path, payload):
+    checkpoint = tmp_path / "translation-checkpoint.json"
+    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert translate_service._load_translation_checkpoint(checkpoint) == {}
+
+
 def test_translate_text_rejects_invalid_cached_chunk(tmp_path, monkeypatch):
     source = "Translate this paragraph."
     checkpoint = tmp_path / "translation-checkpoint.json"
@@ -213,3 +291,47 @@ def test_translate_text_rejects_invalid_cached_chunk(tmp_path, monkeypatch):
 
     assert translated == "安全译文"
     assert calls == [source]
+
+
+def test_normalize_repairs_lost_currency_escape_without_recall(monkeypatch):
+    # A temperature-zero model reproduces the same corruption on retry, so the
+    # dropped backslash is restored deterministically instead of re-asking.
+    repaired = translate_service._normalize_translation(
+        "shirts priced \\$10.99 to \\$3.99", "shirts priced $10.99 to $3.99"
+    )
+    assert repaired == "shirts priced \\$10.99 to \\$3.99"
+
+    # Cached chunks self-heal the same way on checkpoint load.
+    cached = translate_service._normalize_translation("shirt \\$10.99", "shirt $10.99")
+    assert cached == "shirt \\$10.99"
+
+    # Real math in the source keeps unescaped delimiters untouched.
+    assert (
+        translate_service._normalize_translation("formula $x$ holds", "公式 $x$ 成立")
+        == "公式 $x$ 成立"
+    )
+
+
+def test_translate_accepts_preserved_currency_escape_and_real_math():
+    translate_service._validate_translation("shirts \\$10.99", "shirts \\$10.99")
+    translate_service._validate_translation("formula $x$ holds", "formula $x$ holds")
+    translate_service._validate_translation("price \\$9", "price 9 dollars")
+
+
+def test_translate_ir_repairs_chunk_that_loses_currency_escape(monkeypatch):
+    calls: list[str] = []
+
+    def fake_chat(message, system_prompt, **kwargs):
+        calls.append(message)
+        assert "@@SEG@@" in message
+        # First member lost the escape; second member is fine. The repair must
+        # happen inline, so exactly one batch call is made.
+        return "shirt $10.99 Big & Tall@@SEG@@第二段"
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", fake_chat)
+    ir = [Paragraph(runs=[TextRun(text="shirt \\$10.99"), TextRun(text="Second")])]
+    translate_service.translate_ir(ir)
+
+    assert ir[0].runs[0].text == "shirt \\$10.99 Big & Tall"
+    assert ir[0].runs[1].text == "第二段"
+    assert len(calls) == 1

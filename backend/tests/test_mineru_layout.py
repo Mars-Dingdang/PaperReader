@@ -1,3 +1,5 @@
+import re
+
 from app.services.mineru_layout import (
     DisplayMath,
     Image,
@@ -260,3 +262,58 @@ def test_create_translated_tex_from_ir_returns_iterable_repairs(tmp_path):
     assert isinstance(repairs, list)
     tex_written = (tmp_path / "translated.tex").read_text(encoding="utf-8")
     assert "\\begin{document}" in tex_written
+
+
+def test_typed_math_output_keeps_bare_currency_dollars_literal():
+    """Regression (v2.1.6 GiGPO run): content_list_v2 types math explicitly
+    but strips the backslash from escaped currency. With typed math present,
+    bare ``$`` in prose must stay literal instead of pairing into fake inline
+    math that swallows ``Big & Tall``."""
+    pages = [
+        [
+            {
+                "type": "title",
+                "content": {"title_content": [{"type": "text", "content": "Appendix"}], "level": 1},
+            },
+            {
+                "type": "list",
+                "content": {
+                    "list_type": "reference_list",
+                    "list_items": [
+                        {
+                            "item_type": "text",
+                            "item_content": [
+                                {
+                                    "type": "text",
+                                    "content": "'B09QQP3356': shirt 'Big & Tall', $10.99 to $3.99.",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "paragraph",
+                "content": {
+                    "paragraph_content": [
+                        {"type": "text", "content": "The objective "},
+                        {"type": "equation_inline", "content": "J(\\theta)"},
+                        {"type": "text", "content": " is maximized."},
+                    ]
+                },
+            },
+        ]
+    ]
+
+    ir = blocks_to_ir(pages)
+    list_runs = next(block for block in ir if isinstance(block, ListBlock)).items[0]
+    assert [type(run) for run in list_runs] == [TextRun]
+    assert "$10.99 to $3.99" in list_runs[0].text
+
+    paragraph = next(block for block in ir if isinstance(block, Paragraph))
+    assert any(isinstance(run, InlineMath) and run.latex == "J(\\theta)" for run in paragraph.runs)
+
+    tex = render_ir_to_tex(ir)
+    assert not re.search(r"(?<!\\)\$\d", tex)
+    assert "\\$10.99 to \\$3.99" in tex
+    assert "Big \\& Tall" in tex

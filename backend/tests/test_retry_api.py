@@ -1,6 +1,9 @@
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
+import pytest
 
 from app.core.config import settings
+from app.core.database import db_cursor
 from app.main import app
 from app.models import store
 from app.core.database import init_database
@@ -106,6 +109,47 @@ def test_startup_converts_interrupted_work_into_retryable_failure(isolated_stora
     assert recovered.failure.retryable is True
 
 
+def test_startup_converts_orphaned_queued_work_into_retryable_failure(isolated_storage):
+    source = settings.upload_dir / "queued-at-exit.pdf"
+    source.write_bytes(b"pdf")
+    store.save_document(
+        store.DocumentRecord("queued-at-exit", 1, "pdf", source, status="queued")
+    )
+    store.DOCUMENTS.clear()
+
+    init_database()
+
+    recovered = store.get_document("queued-at-exit")
+    assert recovered is not None
+    assert recovered.status == "failed"
+    assert recovered.failure is not None
+    assert recovered.failure.stage == "upload"
+    assert recovered.failure.retryable is True
+
+
+def test_retry_claim_uses_database_compare_and_set(isolated_storage):
+    source = settings.upload_dir / "cas.pdf"
+    source.write_bytes(b"pdf")
+    record = store.DocumentRecord(
+        "cas-doc",
+        1,
+        "pdf",
+        source,
+        status="failed",
+        failure=store.FailureEntry(stage="translate", message="failed"),
+    )
+    store.save_document(record)
+    # Simulate another worker claiming the DB row while this process still
+    # holds a stale failed record in its in-memory cache.
+    with db_cursor() as conn:
+        conn.execute("UPDATE documents SET status = 'queued' WHERE document_id = ?", (record.document_id,))
+
+    with pytest.raises(HTTPException) as exc_info:
+        store.queue_document_retry(record.document_id, 1)
+
+    assert exc_info.value.status_code == 409
+
+
 def test_stage_transitions_are_persisted_even_when_stage_raises(isolated_storage):
     source = settings.upload_dir / "stage.pdf"
     source.write_bytes(b"pdf")
@@ -125,3 +169,37 @@ def test_stage_transitions_are_persisted_even_when_stage_raises(isolated_storage
     parse = next(stage for stage in persisted.stages if stage.key == "parse")
     assert parse.status == "failed"
     assert persisted.current_stage == "parse"
+
+
+def test_background_pipeline_failure_marks_document_failed(isolated_storage, monkeypatch):
+    from app.api import routes_document, routes_upload
+
+    def boom(user_id: int):
+        raise RuntimeError("settings store unavailable")
+
+    monkeypatch.setattr(routes_document, "process_document", lambda *a, **k: None)
+    monkeypatch.setattr(routes_document, "ensure_user_settings", boom)
+    monkeypatch.setattr(routes_upload, "process_document", lambda *a, **k: None)
+    monkeypatch.setattr(routes_upload, "ensure_user_settings", boom)
+
+    with TestClient(app) as client:
+        user = _register(client, "wrapper-user")
+        source = settings.upload_dir / "wrapper.pdf"
+        source.write_bytes(b"pdf")
+        record = store.DocumentRecord(
+            "wrapper-doc",
+            user["id"],
+            "pdf",
+            source,
+            status="queued",
+        )
+        init_stages(record)
+        store.save_document(record)
+
+        routes_document._run_retry_pipeline("wrapper-doc", user["id"], "translate")
+
+        reloaded = store.get_document("wrapper-doc")
+        assert reloaded.status == "failed"
+        assert reloaded.failure.retryable is True
+        assert "Retry pipeline failed to start" in reloaded.failure.message
+        assert any("Error:" in line for line in reloaded.logs)

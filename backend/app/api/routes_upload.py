@@ -6,7 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPExcepti
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.models.schemas import UploadResponse
-from app.models.store import get_document
+from app.models.store import get_document, mark_document_failed
 from app.services.auth_service import User, ensure_user_settings, require_provider_settings
 from app.services.document_pipeline import create_document_record, process_document
 
@@ -16,8 +16,12 @@ router = APIRouter()
 
 def _run_pipeline(record_id: str, user_id: int) -> None:
     record = get_document(record_id)
-    if record:
+    if not record:
+        return
+    try:
         process_document(record, provider_settings=ensure_user_settings(user_id))
+    except Exception as exc:  # noqa: BLE001 - never strand the document as queued
+        mark_document_failed(record_id, "upload", f"Pipeline failed to start: {exc}")
 
 
 @router.post("/upload", response_model=UploadResponse)

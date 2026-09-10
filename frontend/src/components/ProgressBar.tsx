@@ -66,8 +66,16 @@ export function ProgressBar({
               <details className="recovery-detail small">
                 <summary>查看自动修复记录（{latexRecovery.repairs.length}）</summary>
                 {latexRecovery.repairs.map((repair, index) => (
-                  <div key={`${repair.start_line}-${index}`}>
-                    第 {repair.start_line}{repair.end_line !== repair.start_line ? `–${repair.end_line}` : ''} 行：{repair.reason || '最小修复'}
+                  <div className="repair-entry" key={`${repair.start_line}-${index}`}>
+                    <div>第 {repair.start_line}{repair.end_line !== repair.start_line ? `–${repair.end_line}` : ''} 行：{repair.reason || '最小修复'}</div>
+                    {(repair.original != null || repair.replacement != null) && (
+                      <div className="repair-diff">
+                        <span>修改前</span>
+                        <pre>{repair.original ?? ''}</pre>
+                        <span>修改后</span>
+                        <pre>{repair.replacement ?? ''}</pre>
+                      </div>
+                    )}
                   </div>
                 ))}
               </details>

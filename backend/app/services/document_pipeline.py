@@ -343,6 +343,8 @@ def _load_extraction_checkpoint(path: Path, source_path: Path) -> MinerUResult |
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return None
         if payload.get("version") != _EXTRACTION_CHECKPOINT_VERSION:
             return None
         if payload.get("source_sha256") != _source_digest(source_path):
@@ -383,6 +385,25 @@ def _persist_latex_recovery(record: DocumentRecord, report: LatexRecoveryEntry) 
     save_document(record)
 
 
+def _compile_result_problem(result) -> str | None:
+    if result.warning:
+        return result.warning
+    if result.errors:
+        return "; ".join(
+            f"L{item.get('line')}: {item.get('message')}" for item in result.errors[:8]
+        )
+    if result.missing_chars:
+        return "LaTeX log still contains missing glyphs"
+    return None
+
+
+def _mark_clean_latex_recovery(record: DocumentRecord) -> None:
+    record.last_compile_warning = None
+    if record.latex_recovery and record.latex_recovery.status == "failed":
+        record.latex_recovery.status = "succeeded"
+        record.latex_recovery.last_error = None
+
+
 def _compile_translated_tex(
     record: DocumentRecord,
     translated_tex: Path,
@@ -399,19 +420,21 @@ def _compile_translated_tex(
     _append_artifact(record, "translated.tex", "translated_tex", translated_tex)
     save_document(record)
     preflight = validate_latex_structure(translated_tex.read_text(encoding="utf-8", errors="replace"))
+    if preflight:
+        digest = "; ".join(f"L{line}: {message}" for line, message in preflight[:8])
+        record.logs.append(f"LaTeX preflight advisory: {digest}")
     compile_result = None
     initial_error: Exception | None = None
-    if not preflight:
-        try:
-            compile_result = compile_tex_project_with_fallback(
-                translated_tex, output_dir, compiler=TRANSLATED_LATEX_COMPILER
-            )
-        except Exception as exc:
-            initial_error = exc
-    else:
-        initial_error = RuntimeError(
-            "; ".join(f"L{line}: {message}" for line, message in preflight[:8])
+    try:
+        compile_result = compile_tex_project_with_fallback(
+            translated_tex, output_dir, compiler=TRANSLATED_LATEX_COMPILER
         )
+        compile_problem = _compile_result_problem(compile_result)
+        if compile_problem:
+            initial_error = RuntimeError(compile_problem)
+            compile_result = None
+    except Exception as exc:
+        initial_error = exc
 
     if compile_result is None:
         record.logs.append(f"LaTeX compile requires recovery: {initial_error}")
@@ -428,6 +451,9 @@ def _compile_translated_tex(
             )
         compile_result = outcome.result
         record.status = "processing"
+        record.last_compile_warning = None
+    else:
+        _mark_clean_latex_recovery(record)
     return compile_result
 
 
@@ -453,19 +479,21 @@ def _compile_translated_tex_project(
     project_tex = record.source_path.parent / "__translated.tex"
     project_tex.write_text(sanitized_text, encoding="utf-8")
     preflight = validate_latex_structure(sanitized_text)
+    if preflight:
+        digest = "; ".join(f"L{line}: {message}" for line, message in preflight[:8])
+        record.logs.append(f"LaTeX preflight advisory: {digest}")
     compile_result = None
     initial_error: Exception | None = None
-    if not preflight:
-        try:
-            compile_result = compile_tex_project_with_fallback(
-                project_tex, output_dir, compiler=TRANSLATED_LATEX_COMPILER
-            )
-        except Exception as exc:
-            initial_error = exc
-    else:
-        initial_error = RuntimeError(
-            "; ".join(f"L{line}: {message}" for line, message in preflight[:8])
+    try:
+        compile_result = compile_tex_project_with_fallback(
+            project_tex, output_dir, compiler=TRANSLATED_LATEX_COMPILER
         )
+        compile_problem = _compile_result_problem(compile_result)
+        if compile_problem:
+            initial_error = RuntimeError(compile_problem)
+            compile_result = None
+    except Exception as exc:
+        initial_error = exc
 
     if compile_result is None:
         record.logs.append(f"LaTeX compile requires recovery: {initial_error}")
@@ -488,6 +516,9 @@ def _compile_translated_tex_project(
             )
         compile_result = outcome.result
         record.status = "processing"
+        record.last_compile_warning = None
+    else:
+        _mark_clean_latex_recovery(record)
     return compile_result
 
 
@@ -624,6 +655,7 @@ def process_document(
     output_dir = settings.output_dir / record.document_id
     output_dir.mkdir(parents=True, exist_ok=True)
     record.logs.append(f"Output dir: {output_dir}")
+    resumed_extraction: MinerUResult | None = None
 
     try:
         if not resume_from:
@@ -686,7 +718,21 @@ def process_document(
                 record.failure = None
                 record.logs.append("Processing done")
                 return save_document(record)
-            record.logs.append("Extraction checkpoint missing or invalid; falling back to parse")
+            if mineru_checkpoint is not None:
+                resumed_extraction = mineru_checkpoint
+                resume_from = "clean"
+                record.logs.append("Extracted-text state missing; rebuilding it from checkpoint")
+            else:
+                record.logs.append("Extraction checkpoint missing or invalid; falling back to parse")
+
+        if record.source_type == "pdf" and resume_from == "clean" and resumed_extraction is None:
+            resumed_extraction = _load_extraction_checkpoint(
+                output_dir / "extraction-checkpoint.json", record.source_path
+            )
+            if resumed_extraction is not None:
+                record.logs.append("Reusing completed extraction checkpoint")
+            else:
+                record.logs.append("Extraction checkpoint missing or invalid; falling back to parse")
 
         if record.source_type in ("tex", "tex_project"):
             with with_stage(record, "compile_original"):
@@ -763,53 +809,61 @@ def process_document(
             record.logs.append("Processing done")
             return save_document(record)
         else:
-            with with_stage(record, "parse"):
-                record.logs.append("Handling source PDF")
-                original_out = output_dir / "original.pdf"
-                shutil.copyfile(record.source_path, original_out)
-                record.original_pdf_url = f"/data/outputs/{record.document_id}/original.pdf"
-                _append_artifact(record, "original.pdf", "original_pdf", original_out)
-                _append_artifact(record, record.source_path.name, "source_pdf", record.source_path)
+            if resumed_extraction is not None:
+                mineru_result = resumed_extraction
+                extract_dir = (
+                    mineru_result.images_dir.parent
+                    if mineru_result.images_dir is not None
+                    else output_dir
+                )
+            else:
+                with with_stage(record, "parse"):
+                    record.logs.append("Handling source PDF")
+                    original_out = output_dir / "original.pdf"
+                    shutil.copyfile(record.source_path, original_out)
+                    record.original_pdf_url = f"/data/outputs/{record.document_id}/original.pdf"
+                    _append_artifact(record, "original.pdf", "original_pdf", original_out)
+                    _append_artifact(record, record.source_path.name, "source_pdf", record.source_path)
 
-                if parser == "mineru":
-                    extract_dir = output_dir / "mineru"
-                    record.logs.append("Submitting PDF to MinerU")
-                    try:
-                        mineru_result = extract_structured_from_pdf(
-                            str(record.source_path),
-                            extract_dir,
-                            log_sink=record.logs,
-                            progress_cb=lambda frac, label: set_stage_progress(
-                                record, "parse", frac, label
-                            ),
-                            config=mineru_config,
-                        )
-                    except Exception as mineru_exc:
-                        # MinerU's result CDN can fail after cloud parsing has
-                        # completed. Keep the website usable for text-layer PDFs
-                        # by falling back locally instead of failing the task.
-                        record.logs.append(
-                            f"MinerU unavailable ({mineru_exc}); falling back to local PDF parsing"
-                        )
-                        extract_dir = output_dir / "local"
+                    if parser == "mineru":
+                        extract_dir = output_dir / "mineru"
+                        record.logs.append("Submitting PDF to MinerU")
                         try:
-                            mineru_result = extract_structured_from_pdf_local(
-                                str(record.source_path), extract_dir, log_sink=record.logs
+                            mineru_result = extract_structured_from_pdf(
+                                str(record.source_path),
+                                extract_dir,
+                                log_sink=record.logs,
+                                progress_cb=lambda frac, label: set_stage_progress(
+                                    record, "parse", frac, label
+                                ),
+                                config=mineru_config,
                             )
-                        except Exception as local_exc:
-                            raise RuntimeError(
-                                f"MinerU parsing failed: {mineru_exc}; local fallback also failed: {local_exc}"
-                            ) from local_exc
-                else:
-                    extract_dir = output_dir
-                    record.logs.append("Extracting PDF locally (text layer + images)")
-                    mineru_result = extract_structured_from_pdf_local(
-                        str(record.source_path), extract_dir, log_sink=record.logs
-                    )
+                        except Exception as mineru_exc:
+                            # MinerU's result CDN can fail after cloud parsing has
+                            # completed. Keep the website usable for text-layer PDFs
+                            # by falling back locally instead of failing the task.
+                            record.logs.append(
+                                f"MinerU unavailable ({mineru_exc}); falling back to local PDF parsing"
+                            )
+                            extract_dir = output_dir / "local"
+                            try:
+                                mineru_result = extract_structured_from_pdf_local(
+                                    str(record.source_path), extract_dir, log_sink=record.logs
+                                )
+                            except Exception as local_exc:
+                                raise RuntimeError(
+                                    f"MinerU parsing failed: {mineru_exc}; local fallback also failed: {local_exc}"
+                                ) from local_exc
+                    else:
+                        extract_dir = output_dir
+                        record.logs.append("Extracting PDF locally (text layer + images)")
+                        mineru_result = extract_structured_from_pdf_local(
+                            str(record.source_path), extract_dir, log_sink=record.logs
+                        )
 
-            _save_extraction_checkpoint(
-                output_dir / "extraction-checkpoint.json", record.source_path, mineru_result
-            )
+                _save_extraction_checkpoint(
+                    output_dir / "extraction-checkpoint.json", record.source_path, mineru_result
+                )
 
             with with_stage(record, "clean"):
                 extracted_text = mineru_result.markdown

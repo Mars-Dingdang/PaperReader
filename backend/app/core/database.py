@@ -186,7 +186,7 @@ def init_database() -> None:
         rows = conn.execute(
             """
             SELECT document_id, current_stage, retry_count, stages_json
-            FROM documents WHERE status IN ('processing', 'recovering')
+            FROM documents WHERE status IN ('queued', 'processing', 'recovering')
             """
         ).fetchall()
         for row in rows:
@@ -200,7 +200,7 @@ def init_database() -> None:
                     entry["status"] = "failed"
             failure = {
                 "stage": stage,
-                "message": "The application exited while this stage was running",
+                "message": "The application exited before this queued or running stage completed",
                 "retryable": True,
                 "chunk": None,
                 "retry_count": int(row["retry_count"] or 0),

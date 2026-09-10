@@ -1181,6 +1181,33 @@ textarea { resize: vertical; }
   border-left: 2px solid var(--border-strong);
   padding-left: 8px;
 }
+
+.repair-entry + .repair-entry {
+  margin-top: 10px;
+}
+
+.repair-diff {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.repair-diff span {
+  color: var(--muted);
+}
+
+.repair-diff pre {
+  max-height: 160px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--text);
+}
 .recovery-detail summary {
   cursor: pointer;
 }
