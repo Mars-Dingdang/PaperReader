@@ -2,7 +2,7 @@
 
 [Download Windows / macOS v2.1.7](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.7) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.7.md)
 
-v2.1.7 fixes translated-PDF compilation in the macOS desktop app. An absolute `LATEXMK_PATH` now exposes sibling TeX engines such as `xelatex` to `latexmk`, generated and resumed translations avoid obsolete `ctex` platform font presets, and local PDF extraction safely handles malformed formula samples and split bracket glyphs. Frontend/API package version: `2.1.7`.
+v2.1.7 fixes translated-PDF compilation in the macOS desktop app. An absolute `LATEXMK_PATH` now exposes sibling TeX engines such as `xelatex` to `latexmk`, generated and resumed translations avoid obsolete `ctex` platform font presets, Unicode replacement markers no longer become blank glyphs, and successful strict builds keep non-fatal font diagnostics as warnings. Frontend/API package version: `2.1.7`.
 
 Windows users: extract the complete ZIP and run `PaperReader.exe`. Apple Silicon Mac users: open the DMG and copy PaperReader to Applications. Both builds show the provider setup wizard on first launch. TeX Live / `latexmk` and the selected TeX engine are still required for translated PDF generation; projects without a declaration use XeLaTeX by default. See the [Windows guide](desktop/README_zh.md) and [macOS guide](desktop/README_macos_zh.md).
 
@@ -21,7 +21,7 @@ A full-stack application for bilingual paper reading:
 - Four-layer LaTeX-failure prevention and recovery:
   1. **Prose sanitizer** rewrites raw Greek / math unicode (`ε`, `≤`, `→`, `Σ`…) into proper inline math
   2. **Force-fallback compile**: strict pass first, then `latexmk -f` so a PDF is still produced; surfaces `last_compile_warning`
-  3. **Bounded model repair**: compiler windows are diagnosed first, then only exact JSON patches inside those windows may be applied (maximum two rounds, with backups)
+  3. **Bounded model repair**: compiler windows are diagnosed first, then only exact JSON patches with a unique original-text match inside those windows may be applied (maximum two rounds, with backups)
   4. **Manual editor**: pencil button on the `translated.tex` artifact opens an in-browser editor that saves and recompiles
 - Left/center/right reading workspace with toggleable Upload / Reader / Chat regions
 - Show original and translated PDF side-by-side

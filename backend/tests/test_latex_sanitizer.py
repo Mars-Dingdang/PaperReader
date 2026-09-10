@@ -60,6 +60,13 @@ def test_sanitize_math_star_and_real_control_characters() -> None:
     assert any("control" in note for note in repairs)
 
 
+def test_sanitize_removes_unicode_replacement_marker() -> None:
+    out, repairs = sanitize_and_repair("我们发\ufffd现了这个结果。")
+
+    assert out == "我们发现了这个结果。"
+    assert any("Unicode replacement" in note for note in repairs)
+
+
 def test_detect_font_unsafe_chars_flags_unknown_only() -> None:
     src = "中文 ok ‘—…’ □ ε ∷"
     found = detect_font_unsafe_chars(src)

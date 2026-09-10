@@ -387,19 +387,17 @@ def _persist_latex_recovery(record: DocumentRecord, report: LatexRecoveryEntry) 
 
 
 def _compile_result_problem(result) -> str | None:
-    if result.warning:
-        return result.warning
     if result.errors:
         return "; ".join(
             f"L{item.get('line')}: {item.get('message')}" for item in result.errors[:8]
         )
-    if result.missing_chars:
-        return "LaTeX log still contains missing glyphs"
+    if result.used_fallback:
+        return result.warning or "LaTeX strict compile failed; PDF required the lenient fallback"
     return None
 
 
-def _mark_clean_latex_recovery(record: DocumentRecord) -> None:
-    record.last_compile_warning = None
+def _mark_clean_latex_recovery(record: DocumentRecord, warning: str | None = None) -> None:
+    record.last_compile_warning = warning
     if record.latex_recovery and record.latex_recovery.status == "failed":
         record.latex_recovery.status = "succeeded"
         record.latex_recovery.last_error = None
@@ -453,9 +451,9 @@ def _compile_translated_tex(
             )
         compile_result = outcome.result
         record.status = "processing"
-        record.last_compile_warning = None
+        record.last_compile_warning = compile_result.warning
     else:
-        _mark_clean_latex_recovery(record)
+        _mark_clean_latex_recovery(record, compile_result.warning)
     return compile_result
 
 
@@ -519,9 +517,9 @@ def _compile_translated_tex_project(
             )
         compile_result = outcome.result
         record.status = "processing"
-        record.last_compile_warning = None
+        record.last_compile_warning = compile_result.warning
     else:
-        _mark_clean_latex_recovery(record)
+        _mark_clean_latex_recovery(record, compile_result.warning)
     return compile_result
 
 

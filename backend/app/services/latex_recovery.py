@@ -173,10 +173,8 @@ def _validate_and_apply_patches(
             after = str(item["replacement"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("patch is missing a valid line range or text") from exc
-        if start < begin_document or end < start or end > total_lines:
-            raise ValueError("patch is outside the document body")
-        if any(line not in allowed for line in range(start, end + 1)):
-            raise ValueError("patch is outside compiler-located error windows")
+        if end < start:
+            raise ValueError("patch has an invalid line range")
         if _DANGEROUS_COMMAND_RE.search(after):
             raise ValueError("unsafe LaTeX command in proposed patch")
         new_paths = set(_FILE_PATH_RE.findall(after)) - set(_FILE_PATH_RE.findall(before))
@@ -191,9 +189,38 @@ def _validate_and_apply_patches(
         }
         if introduced_commands:
             raise ValueError("proposed patch introduces a control sequence")
-        actual = "\n".join(_line_body(line) for line in lines[start - 1 : end])
+        declared_range_is_allowed = (
+            start >= begin_document
+            and end <= total_lines
+            and all(line in allowed for line in range(start, end + 1))
+        )
+        actual = (
+            "\n".join(_line_body(line) for line in lines[start - 1 : end])
+            if declared_range_is_allowed
+            else None
+        )
         if actual != before:
-            raise ValueError("patch original text was not found at the declared line range")
+            # Models occasionally copy the exact source but report a nearby
+            # numbered-context line. Accept only a unique verbatim match that
+            # remains wholly inside the compiler-located window.
+            before_line_count = before.count("\n") + 1
+            candidates: list[tuple[int, int]] = []
+            for candidate_start in sorted(allowed):
+                candidate_end = candidate_start + before_line_count - 1
+                if candidate_start < begin_document or candidate_end > total_lines:
+                    continue
+                if any(line not in allowed for line in range(candidate_start, candidate_end + 1)):
+                    continue
+                candidate_actual = "\n".join(
+                    _line_body(line) for line in lines[candidate_start - 1 : candidate_end]
+                )
+                if candidate_actual == before:
+                    candidates.append((candidate_start, candidate_end))
+            if len(candidates) != 1:
+                raise ValueError(
+                    "patch original text was not uniquely found in the compiler error window"
+                )
+            start, end = candidates[0]
         if before == after:
             raise ValueError("proposed patch does not change the source")
         normalized.append(
@@ -336,8 +363,8 @@ def recover_latex_document(
             except Exception as exc:  # a later round may repair the remaining error
                 report.last_error = str(exc)
                 continue
-            if result.warning or result.errors or result.missing_chars:
-                report.last_error = result.warning or "LaTeX log still contains errors or missing glyphs"
+            if result.used_fallback or result.errors:
+                report.last_error = result.warning or "LaTeX log still contains errors"
                 continue
             report.status = "succeeded"
             report.last_error = None

@@ -114,9 +114,9 @@ def _markdown_to_latex_fallback(text: str) -> str:
 class LatexCompileResult:
     """Outcome of a (possibly fallback) LaTeX compilation.
 
-    `warning` is set when the strict pass failed but a successful lenient
-    `-f` pass produced a PDF; it contains the original strict-mode error
-    detail so the UI can surface it without aborting the pipeline.
+    `warning` contains non-fatal diagnostics for the UI. `used_fallback`
+    distinguishes a PDF produced only by the lenient `-f` pass from a strict
+    compile that merely reported missing glyphs.
 
     `errors` (``[{line, message}]``) and `missing_chars`
     (``[{char, codepoint, count, suggest}]``) are parsed from the TeX log so
@@ -130,11 +130,13 @@ class LatexCompileResult:
         *,
         errors: list[dict] | None = None,
         missing_chars: list[dict] | None = None,
+        used_fallback: bool = False,
     ) -> None:
         self.pdf_path = pdf_path
         self.warning = warning
         self.errors = errors or []
         self.missing_chars = missing_chars or []
+        self.used_fallback = used_fallback
 
 
 def _normalize_latex_compiler(value: object) -> str | None:
@@ -394,7 +396,11 @@ def compile_tex_project_with_fallback(
             warning += f" Missing glyphs: {_summarize_missing_chars(missing_chars)}"
         logger.warning(warning)
         return LatexCompileResult(
-            expected_pdf, warning=warning, errors=errors, missing_chars=missing_chars
+            expected_pdf,
+            warning=warning,
+            errors=errors,
+            missing_chars=missing_chars,
+            used_fallback=True,
         )
 
     lenient_detail = (lenient.stderr or lenient.stdout or "").strip()

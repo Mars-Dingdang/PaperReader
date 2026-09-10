@@ -539,6 +539,17 @@ def sanitize_and_repair(text: str) -> tuple[str, list[str]]:
     stay a single literal character, so substituting it (e.g. to
     ``$\\square$``) breaks the compile with "Invalid argument".
     """
+    replacement_count = text.count("\ufffd")
+    if replacement_count:
+        # U+FFFD is a decoder/model corruption marker rather than document
+        # content. Leaving it in the source produces a blank XeLaTeX glyph;
+        # removing it also repairs duplicated insertions such as 发�现.
+        text = text.replace("\ufffd", "")
+    replacement_repairs = (
+        [f"Removed {replacement_count} Unicode replacement character(s)"]
+        if replacement_count
+        else []
+    )
     control_count = sum(1 for ch in text if ord(ch) < 32 and ch not in "\n\r\t")
     if control_count:
         text = "".join(ch for ch in text if ord(ch) >= 32 or ch in "\n\r\t")
@@ -551,7 +562,7 @@ def sanitize_and_repair(text: str) -> tuple[str, list[str]]:
     if parts is None:
         sanitized = sanitize_latex_body(text)
         repaired, repairs = repair_common_math_faults(sanitized)
-        return repaired, control_repairs + repairs
+        return repaired, replacement_repairs + control_repairs + repairs
     head, body, tail = parts
     body, repairs = repair_common_math_faults(sanitize_latex_body(body))
-    return head + body + tail, control_repairs + repairs
+    return head + body + tail, replacement_repairs + control_repairs + repairs

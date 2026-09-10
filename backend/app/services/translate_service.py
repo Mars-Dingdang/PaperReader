@@ -448,7 +448,11 @@ def _repair_lost_dollar_escapes(source: str, translated: str) -> str:
 
 def _normalize_translation(source: str, translated: str) -> str:
     """Repair deterministic corruptions first, then validate the result."""
-    repaired = _repair_lost_dollar_escapes(source, translated)
+    # U+FFFD carries no recoverable content and renders as a blank glyph in
+    # XeLaTeX. Models can also insert it between duplicated neighboring
+    # characters (for example 发�现), where removal restores the intended word.
+    repaired = translated.replace("\ufffd", "")
+    repaired = _repair_lost_dollar_escapes(source, repaired)
     _validate_translation(source, repaired)
     return repaired
 

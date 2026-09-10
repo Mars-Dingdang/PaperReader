@@ -142,6 +142,30 @@ def test_recovery_rejects_new_file_io_command_and_bare_filename(tmp_path):
             raise AssertionError("unsafe patch must be rejected")
 
 
+def test_patch_validator_relocates_unique_original_inside_error_window(tmp_path):
+    tex_path = tmp_path / "translated.tex"
+    tex_path.write_text(_fixture_tex(), encoding="utf-8")
+
+    changes = latex_recovery._validate_and_apply_patches(
+        tex_path,
+        {
+            "patches": [{
+                "start_line": 4,
+                "end_line": 4,
+                "original": "Big & Tall",
+                "replacement": r"Big \& Tall",
+                "reason": "escape",
+            }]
+        },
+        {3, 4, 5, 6},
+        1,
+    )
+
+    assert changes[0]["start_line"] == 5
+    assert changes[0]["end_line"] == 5
+    assert "Big \\& Tall" in tex_path.read_text(encoding="utf-8")
+
+
 def test_repair_write_is_atomic_and_existing_backup_is_not_overwritten(tmp_path, monkeypatch):
     tex_path = tmp_path / "translated.tex"
     tex_path.write_text(_fixture_tex(), encoding="utf-8")
@@ -233,7 +257,7 @@ def test_recovery_stops_after_two_rounds(tmp_path, monkeypatch):
     assert (tmp_path / "translated.before-repair-2.tex").exists()
 
 
-def test_pipeline_treats_lenient_or_missing_glyph_result_as_recovery_input(
+def test_pipeline_treats_lenient_result_as_recovery_input(
     isolated_storage, monkeypatch
 ):
     source = isolated_storage / "source.pdf"
@@ -272,6 +296,41 @@ def test_pipeline_treats_lenient_or_missing_glyph_result_as_recovery_input(
 
     assert result.pdf_path == recovered_pdf
     assert recovery_calls == [1]
+
+
+def test_pipeline_accepts_strict_compile_with_missing_glyph_warning(
+    isolated_storage, monkeypatch
+):
+    source = isolated_storage / "source.pdf"
+    source.write_bytes(b"pdf")
+    record = store.DocumentRecord("glyph-warning", 1, "pdf", source)
+    tex_path = isolated_storage / "translated.tex"
+    tex_path.write_text(_fixture_tex().replace("Big & Tall", "Safe text"), encoding="utf-8")
+    pdf = isolated_storage / "translated.pdf"
+    pdf.write_bytes(b"pdf")
+    warning = "PDF compiled, but one character is missing from the font"
+
+    monkeypatch.setattr(
+        document_pipeline,
+        "compile_tex_project_with_fallback",
+        lambda *a, **k: LatexCompileResult(
+            pdf,
+            warning=warning,
+            missing_chars=[{"char": "∷", "codepoint": "U+2237", "count": 1}],
+        ),
+    )
+    monkeypatch.setattr(
+        document_pipeline,
+        "recover_latex_document",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not recover")),
+    )
+
+    result = document_pipeline._compile_translated_tex(
+        record, tex_path, isolated_storage, provider_settings=None
+    )
+
+    assert result.pdf_path == pdf
+    assert record.last_compile_warning == warning
 
 
 def test_clean_recompile_clears_stale_recovery_failure(isolated_storage, monkeypatch):

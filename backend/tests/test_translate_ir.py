@@ -305,6 +305,14 @@ def test_normalize_repairs_lost_currency_escape_without_recall(monkeypatch):
     cached = translate_service._normalize_translation("shirt \\$10.99", "shirt $10.99")
     assert cached == "shirt \\$10.99"
 
+
+def test_normalize_removes_unicode_replacement_marker() -> None:
+    repaired = translate_service._normalize_translation(
+        "We find this result.", "我们发\ufffd现了这个结果。"
+    )
+
+    assert repaired == "我们发现了这个结果。"
+
     # Real math in the source keeps unescaped delimiters untouched.
     assert (
         translate_service._normalize_translation("formula $x$ holds", "公式 $x$ 成立")
