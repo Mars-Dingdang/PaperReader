@@ -226,6 +226,17 @@ def _split_text_at_math(text: str, split_bare_dollars: bool = True) -> list[Run]
         if not latex:
             cursor = end + len(closing)
             continue
+        if closing == "$":
+            prose_words = re.findall(r"[A-Za-z]{2,}", latex)
+            if (
+                re.search(r"\\[\[(]", latex)
+                or (re.match(r"\d", latex) and len(prose_words) >= 2)
+            ):
+                cursor = content_start
+                continue
+        elif opening in latex or re.search(r"(?<!\\)\$", latex):
+            cursor = content_start
+            continue
         prose = text[prose_start:cursor]
         if prose:
             runs.append(TextRun(text=prose))

@@ -34,6 +34,12 @@ def _bytes_resp(status: int, data: bytes) -> MagicMock:
     return resp
 
 
+def test_pdf_text_layer_normalizes_split_bracket_glyphs():
+    source = "x,xt∼pt\uf8ee\n\uf8f01\nvalue\uf8f9\n\uf8fb (1)"
+
+    assert mineru_service._clean_pdf_layer_text(source) == "x,xt∼pt[\n1\nvalue]\n(1)"
+
+
 def test_extract_text_from_pdf_happy_path(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "mineru_api_key", "test-token")
     monkeypatch.setattr(settings, "mineru_poll_interval", 0)

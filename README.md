@@ -1,8 +1,8 @@
-# PaperReader v2.1.6
+# PaperReader v2.1.7
 
-[Download Windows / macOS v2.1.6](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.6) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.6.md)
+[Download Windows / macOS v2.1.7](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.7) · [v1.0 source](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v1.0) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.7.md)
 
-v2.1.6 makes PDF translation recoverable. Verified translation chunks and structured extraction are checkpointed atomically, failed jobs can resume from the earliest missing stage, and LaTeX failures are diagnosed before a bounded two-round automatic repair. The translator now protects XML-like structure tags, rejects model meta-commentary and malformed placeholders, distinguishes escaped currency dollars from real math, escapes prose safely in one pass, and maps `⋆` to `\star`. Frontend/API package version: `2.1.6`.
+v2.1.7 fixes translated-PDF compilation in the macOS desktop app. An absolute `LATEXMK_PATH` now exposes sibling TeX engines such as `xelatex` to `latexmk`, generated and resumed translations avoid obsolete `ctex` platform font presets, and local PDF extraction safely handles malformed formula samples and split bracket glyphs. Frontend/API package version: `2.1.7`.
 
 Windows users: extract the complete ZIP and run `PaperReader.exe`. Apple Silicon Mac users: open the DMG and copy PaperReader to Applications. Both builds show the provider setup wizard on first launch. TeX Live / `latexmk` and the selected TeX engine are still required for translated PDF generation; projects without a declaration use XeLaTeX by default. See the [Windows guide](desktop/README_zh.md) and [macOS guide](desktop/README_macos_zh.md).
 

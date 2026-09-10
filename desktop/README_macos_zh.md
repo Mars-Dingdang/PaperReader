@@ -1,15 +1,15 @@
-# PaperReader v2.1.6 macOS（Apple Silicon）
+# PaperReader v2.1.7 macOS（Apple Silicon）
 
 ## 安装与首次启动
 
-1. 下载 `PaperReader-v2.1.6-macOS-arm64.dmg` 及对应 `.sha256`，校验后打开 DMG。
+1. 下载 `PaperReader-v2.1.7-macOS-arm64.dmg` 及对应 `.sha256`，校验后打开 DMG。
 2. 将 PaperReader 拖入“应用程序”。本版本使用临时签名但未经过 Apple 公证；如果首次打开被拦截，请在 Finder 中按住 Control 点击应用并选择“打开”。
 3. 首次启动会在登录前显示配置向导。填写大模型 API Key、Base URL、模型，以及可选的 MinerU 参数。
 4. 注册或登录后，密钥会转存到当前本地账号的加密数据库。可随时在「个人中心 → AI 服务」修改。
 
 应用数据、隐藏配置和日志位于 `~/Library/Application Support/PaperReader`。不要分享该目录或包含私人论文的数据。
 
-## v2.1.6 LaTeX 兼容性与可恢复翻译
+## v2.1.7 LaTeX 兼容性与可恢复翻译
 
 翻译或 LaTeX 编译失败时，可在进度面板点击“从此处重试”。已完成的结构化解析与译块由 checkpoint 复用；自动 LaTeX 修复最多两轮，并仅允许修改编译器定位的行窗。
 
@@ -25,7 +25,7 @@
 
 - Apple Silicon Mac（arm64），macOS 13 或更高版本。
 - APP 已包含 Python 后端、WKWebView 窗口和前端资源，不需要另装 Python 或 Node.js。
-- 生成中文译文 PDF 仍需安装 MacTeX/TeX Live；应用会自动检测 `/Library/TeX/texbin/latexmk`，并调用源码声明的 TeX 引擎（未声明时为 XeLaTeX）。
+- 生成中文译文 PDF 仍需安装 MacTeX/TeX Live；应用会自动检测 `/Library/TeX/texbin/latexmk`，并将同目录加入编译子进程的 PATH，使 `latexmk` 能正常调用 XeLaTeX 等引擎。
 - LLM、MinerU 和在线文献功能需要网络及用户自己的服务密钥。
 
 ## 开发者构建

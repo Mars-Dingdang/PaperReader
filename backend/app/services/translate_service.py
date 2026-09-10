@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable, TypeVar
 
 from app.core.config import settings
+from app.services.latex_service import CJK_FONT_FALLBACK_PREAMBLE
 from app.services.latex_sanitizer import sanitize_and_repair
 from app.services.llm_client import LLMOutputTruncatedError, llm_client
 from app.services.mineru_layout import (
@@ -66,11 +67,7 @@ _DECLARE_UNICODE_CHARACTER_PATTERN = re.compile(r"\\DeclareUnicodeCharacter\s*\{
 _CJK_PREAMBLE_SNIPPET = (
     "\n% Injected by PaperReader to render Chinese translation\n"
     "\\usepackage{xeCJK}\n"
-    "\\IfFontExistsTF{SimSun}{\\setCJKmainfont[AutoFakeBold]{SimSun}}{%\n"
-    "  \\IfFontExistsTF{Songti SC}{\\setCJKmainfont{Songti SC}}{%\n"
-    "    \\IfFontExistsTF{PingFang SC}{\\setCJKmainfont{PingFang SC}}{%\n"
-    "      \\IfFontExistsTF{Noto Serif CJK SC}{\\setCJKmainfont{Noto Serif CJK SC}}{%\n"
-    "        \\IfFontExistsTF{FandolSong}{\\setCJKmainfont{FandolSong}}{}}}}}\n"
+    + CJK_FONT_FALLBACK_PREAMBLE
 )
 _XELATEX_UNICODE_COMPAT_SNIPPET = (
     "% Injected by PaperReader for pdfLaTeX source compatibility under XeLaTeX\n"

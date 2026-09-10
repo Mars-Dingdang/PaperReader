@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -205,6 +206,15 @@ def _run_latexmk(
     compiler: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     engine_flag = _latexmk_engine_flag(tex_path, compiler)
+    child_env = os.environ.copy()
+    latexmk_path = Path(settings.latexmk_path)
+    if latexmk_path.is_absolute():
+        latex_bin_dir = str(latexmk_path.parent)
+        path_entries = child_env.get("PATH", "").split(os.pathsep)
+        if latex_bin_dir not in path_entries:
+            child_env["PATH"] = os.pathsep.join(
+                entry for entry in (latex_bin_dir, *path_entries) if entry
+            )
     command = [
         settings.latexmk_path,
         engine_flag,
@@ -221,6 +231,7 @@ def _run_latexmk(
         command,
         check=False,
         cwd=str(tex_path.parent),
+        env=child_env,
         capture_output=True,
         text=True,
         creationflags=CREATION_FLAGS,
@@ -460,8 +471,8 @@ def create_translated_tex(source_text: str, out_tex_path: Path, title: str | Non
         title_block = f"\\title{{{title_text}}}\n\\maketitle\n"
     content = f"""
 \\documentclass[12pt]{{article}}
-\\usepackage[UTF8]{{ctex}}
-\\usepackage{{amsmath,amssymb,graphicx,hyperref}}
+\\usepackage[UTF8,fontset=none]{{ctex}}
+{CJK_FONT_FALLBACK_PREAMBLE}\\usepackage{{amsmath,amssymb,graphicx,hyperref}}
 {_UNICODE_FALLBACK_PREAMBLE}\\begin{{document}}
 {title_block}{body}
 \\end{{document}}
@@ -490,6 +501,34 @@ def copy_pdf_to_output(source_pdf: Path, output_pdf: Path) -> None:
 #      characters the user types later in the TeX editor.
 # Valid because translated documents always compile with XeLaTeX + ctex
 # (which loads xeCJK).
+CJK_FONT_FALLBACK_PREAMBLE = (
+    "\\IfFontExistsTF{SimSun}{\\setCJKmainfont[AutoFakeBold]{SimSun}}{%\n"
+    "  \\IfFontExistsTF{Songti SC}{\\setCJKmainfont{Songti SC}}{%\n"
+    "    \\IfFontExistsTF{PingFang SC}{\\setCJKmainfont{PingFang SC}}{%\n"
+    "      \\IfFontExistsTF{Noto Serif CJK SC}{\\setCJKmainfont{Noto Serif CJK SC}}{%\n"
+    "        \\IfFontExistsTF{FandolSong}{\\setCJKmainfont{FandolSong}}{}}}}}\n"
+)
+_CTEX_PACKAGE_RE = re.compile(r"\\usepackage(?:\[([^\]]*)\])?\{ctex\}")
+
+
+def ensure_portable_cjk_font_config(source_text: str) -> str:
+    """Avoid ctex's obsolete platform font presets in translated documents."""
+    match = _CTEX_PACKAGE_RE.search(source_text)
+    if not match:
+        return source_text
+    options = [
+        option.strip()
+        for option in (match.group(1) or "").split(",")
+        if option.strip()
+    ]
+    if any(option.startswith("fontset=") for option in options):
+        return source_text
+    options.append("fontset=none")
+    package = f"\\usepackage[{','.join(options)}]{{ctex}}"
+    replacement = package + "\n" + CJK_FONT_FALLBACK_PREAMBLE.rstrip("\n")
+    return source_text[:match.start()] + replacement + source_text[match.end():]
+
+
 _UNICODE_FALLBACK_PREAMBLE = """\\usepackage{newunicodechar}
 \\newunicodechar{□}{\\ensuremath{\\square}}
 \\newunicodechar{■}{\\ensuremath{\\blacksquare}}
@@ -503,8 +542,8 @@ _UNICODE_FALLBACK_PREAMBLE = """\\usepackage{newunicodechar}
 """
 
 _TEX_DOCUMENT_TEMPLATE = """\\documentclass[{documentclass_opts}]{{article}}
-\\usepackage[UTF8]{{ctex}}
-\\usepackage{{amsmath,amssymb,amsfonts,mathrsfs}}
+\\usepackage[UTF8,fontset=none]{{ctex}}
+{cjk_font_fallback}\\usepackage{{amsmath,amssymb,amsfonts,mathrsfs}}
 \\usepackage{{graphicx}}
 \\usepackage{{float}}
 \\usepackage{{caption}}
@@ -767,6 +806,7 @@ def render_ir_to_tex(
     documentclass_opts = "10pt,twocolumn" if two_column else "12pt"
     return _TEX_DOCUMENT_TEMPLATE.format(
         documentclass_opts=documentclass_opts,
+        cjk_font_fallback=CJK_FONT_FALLBACK_PREAMBLE,
         unicode_fallback=_UNICODE_FALLBACK_PREAMBLE,
         title_block=title_block,
         body=body,

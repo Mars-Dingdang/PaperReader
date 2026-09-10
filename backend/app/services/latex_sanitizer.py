@@ -32,7 +32,8 @@ _CHAR_TO_LATEX: dict[str, str] = {
     "Ξ": r"\Xi", "Π": r"\Pi", "Σ": r"\Sigma", "Υ": r"\Upsilon",
     "Φ": r"\Phi", "Ψ": r"\Psi", "Ω": r"\Omega",
     # Common math operators / arrows
-    "≤": r"\leq", "≥": r"\geq", "≠": r"\neq", "≈": r"\approx", "≡": r"\equiv",
+    "≤": r"\leq", "≥": r"\geq", "≪": r"\ll", "≠": r"\neq", "≈": r"\approx",
+    "≡": r"\equiv",
     "∼": r"\sim", "≅": r"\cong", "∞": r"\infty",
     "→": r"\to", "←": r"\leftarrow", "↔": r"\leftrightarrow",
     "⇒": r"\Rightarrow", "⇐": r"\Leftarrow", "⇔": r"\Leftrightarrow",
@@ -45,7 +46,8 @@ _CHAR_TO_LATEX: dict[str, str] = {
     "∇": r"\nabla", "∂": r"\partial", "∑": r"\sum", "∏": r"\prod",
     "∫": r"\int", "∝": r"\propto",
     "ℝ": r"\mathbb{R}", "ℕ": r"\mathbb{N}", "ℤ": r"\mathbb{Z}",
-    "ℚ": r"\mathbb{Q}", "ℂ": r"\mathbb{C}",
+    "ℚ": r"\mathbb{Q}", "ℂ": r"\mathbb{C}", "ℓ": r"\ell",
+    "′": r"{}^\prime", "⌊": r"\lfloor", "⌋": r"\rfloor",
     "·": r"\cdot",
     # Proof marks / geometric shapes / dingbats that Latin Modern lacks but
     # amssymb provides. Common in CJK lecture notes and OCR output (□ marks

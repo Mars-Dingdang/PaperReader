@@ -22,6 +22,7 @@ from app.services.latex_service import (
     copy_pdf_to_output,
     create_translated_tex,
     create_translated_tex_from_ir,
+    ensure_portable_cjk_font_config,
 )
 from app.services.mineru_layout import (
     Image as IRImage,
@@ -410,9 +411,10 @@ def _compile_translated_tex(
     output_dir: Path,
     provider_settings: UserSettings | None,
 ):
-    current_text = translated_tex.read_text(encoding="utf-8", errors="replace")
+    stored_text = translated_tex.read_text(encoding="utf-8", errors="replace")
+    current_text = ensure_portable_cjk_font_config(stored_text)
     sanitized_text, deterministic_repairs = sanitize_and_repair(current_text)
-    if sanitized_text != current_text:
+    if sanitized_text != stored_text:
         translated_tex.write_text(sanitized_text, encoding="utf-8")
         for repair in deterministic_repairs:
             record.logs.append(f"LaTeX preflight repair: {repair}")
@@ -464,9 +466,10 @@ def _compile_translated_tex_project(
     provider_settings: UserSettings | None,
 ):
     """Compile a translated TeX project while keeping its retry checkpoint durable."""
-    current_text = translated_tex.read_text(encoding="utf-8", errors="replace")
+    stored_text = translated_tex.read_text(encoding="utf-8", errors="replace")
+    current_text = ensure_portable_cjk_font_config(stored_text)
     sanitized_text, deterministic_repairs = sanitize_and_repair(current_text)
-    if sanitized_text != current_text:
+    if sanitized_text != stored_text:
         translated_tex.write_text(sanitized_text, encoding="utf-8")
         for repair in deterministic_repairs:
             record.logs.append(f"LaTeX preflight repair: {repair}")

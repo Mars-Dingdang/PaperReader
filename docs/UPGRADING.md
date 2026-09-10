@@ -1,5 +1,15 @@
 # Upgrading PaperReader
 
+## Upgrading from v2.1.6 to v2.1.7
+
+PaperReader v2.1.7 is backward compatible and requires no data migration. Keep the existing `DATA_DIR`, database, `AUTH_SECRET_KEY`, provider settings, and TeX Live installation.
+
+The macOS desktop launcher already detected `/Library/TeX/texbin/latexmk`, but Finder-launched applications did not expose that directory to child processes. `latexmk` therefore started and then failed with `sh: xelatex: command not found`. PaperReader now prepends the directory containing an absolute `LATEXMK_PATH` to the compiler subprocess environment, allowing `latexmk` to find its sibling engines.
+
+Generated translations now disable `ctex` platform font presets and select the existing SimSun, Songti, PingFang, Noto, or Fandol fallback chain explicitly. A retry upgrades a v2.1.6 `translated.tex` checkpoint before compiling, without repeating extraction or translation. Local PDF extraction also keeps malformed display-math examples as escaped prose, normalizes split PDF bracket glyphs, and maps the math symbols exercised by the diffusion-language-model regression paper.
+
+Frontend, package-lock root metadata, API, desktop guides, and release notes are synchronized to `2.1.7`; the Git tag is `v2.1.7`.
+
 ## Upgrading from v2.1.5 to v2.1.6
 
 PaperReader v2.1.6 is backward compatible. Keep the existing `DATA_DIR`, database, `AUTH_SECRET_KEY`, and provider settings. On first start, SQLite adds nullable failure/recovery JSON columns and a retry counter; no manual migration is required. Jobs left in `processing` or `recovering` by an application exit are marked as retryable failures rather than silently remaining stuck.

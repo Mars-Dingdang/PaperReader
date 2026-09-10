@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -206,6 +207,27 @@ def test_latexmk_child_processes_do_not_flash_a_console_window(tmp_path, monkeyp
         assert observed["creationflags"] == 0
 
 
+def test_absolute_latexmk_path_exposes_sibling_tex_engine(tmp_path, monkeypatch):
+    tex = tmp_path / "paper.tex"
+    tex.write_text(r"\documentclass{article}" "\n", encoding="utf-8")
+    latex_bin_dir = Path("C:/texlive/bin") if os.name == "nt" else Path("/Library/TeX/texbin")
+    latexmk_path = latex_bin_dir / ("latexmk.exe" if os.name == "nt" else "latexmk")
+    observed: dict[str, object] = {}
+
+    def fake_subprocess_run(command, **kwargs):
+        observed.update(kwargs)
+        return CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(latex_service.settings, "latexmk_path", str(latexmk_path))
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
+    monkeypatch.setattr(latex_service.subprocess, "run", fake_subprocess_run)
+
+    latex_service._run_latexmk(tex, tmp_path, force=False, compiler="xelatex")
+
+    child_path = str(observed["env"]["PATH"])
+    assert child_path.split(os.pathsep)[0] == str(latex_bin_dir)
+
+
 # --------------------------------------------------------------------------
 # TeX log diagnostics
 # --------------------------------------------------------------------------
@@ -318,6 +340,30 @@ def test_translated_templates_carry_unicode_fallback_preamble(tmp_path):
     # Prose proof marks are converted to math commands at write time
     assert r"$\square$" in content
     assert "□" not in content.replace("\\newunicodechar{□}", "")
+
+
+def test_translated_templates_disable_obsolete_ctex_platform_fonts(tmp_path):
+    tex_path = tmp_path / "translated.tex"
+    latex_service.create_translated_tex("中文", tex_path)
+    content = tex_path.read_text(encoding="utf-8")
+
+    assert r"\usepackage[UTF8,fontset=none]{ctex}" in content
+    assert "Songti SC" in content
+    assert "FandolSong" in content
+
+
+def test_retry_upgrades_legacy_ctex_template_font_config():
+    legacy = (
+        "\\documentclass{article}\n"
+        "\\usepackage[UTF8]{ctex}\n"
+        "\\begin{document}\n中文\n"
+    )
+
+    updated = latex_service.ensure_portable_cjk_font_config(legacy)
+
+    assert r"\usepackage[UTF8,fontset=none]{ctex}" in updated
+    assert "Songti SC" in updated
+    assert latex_service.ensure_portable_cjk_font_config(updated) == updated
 
 
 def test_create_translated_tex_returns_sqrt_repairs(tmp_path):

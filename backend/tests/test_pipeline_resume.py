@@ -142,7 +142,9 @@ def test_latex_retry_reuses_registered_translated_tex(isolated_storage, monkeypa
     output.mkdir()
     translated_tex = output / "translated.tex"
     translated_tex.write_text(
-        "\\documentclass{article}\n\\begin{document}\nOK\n\\end{document}\n",
+        "\\documentclass{article}\n"
+        "\\usepackage[UTF8]{ctex}\n"
+        "\\begin{document}\nOK\n\\end{document}\n",
         encoding="utf-8",
     )
     record.translated_tex_path = translated_tex
@@ -156,6 +158,7 @@ def test_latex_retry_reuses_registered_translated_tex(isolated_storage, monkeypa
 
     def compile_ok(path, output_dir, compiler=None):
         assert path == translated_tex
+        assert r"\usepackage[UTF8,fontset=none]{ctex}" in path.read_text(encoding="utf-8")
         pdf = output_dir / "translated.pdf"
         pdf.write_bytes(b"pdf")
         return LatexCompileResult(pdf)

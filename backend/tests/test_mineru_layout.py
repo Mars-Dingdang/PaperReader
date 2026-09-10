@@ -101,7 +101,7 @@ def test_render_ir_to_tex_emits_sections_math_and_image():
 
     # Document scaffolding
     assert "\\documentclass" in tex
-    assert "\\usepackage[UTF8]{ctex}" in tex
+    assert "\\usepackage[UTF8,fontset=none]{ctex}" in tex
     assert "mathrsfs" in tex
     assert "\\begin{document}" in tex and "\\end{document}" in tex
 
@@ -252,6 +252,33 @@ def test_escaped_currency_dollars_do_not_turn_prose_into_inline_math():
 
     tex = render_ir_to_tex(ir)
     assert r"Prices are \$10.99 in Big \& Tall and \$3.99 to $x^2$." in tex
+
+
+def test_pdf_sample_currency_and_malformed_display_math_stay_prose():
+    pages = [[{
+        "type": "title",
+        "content": {"title_content": [{"type": "text", "content": "Samples"}], "level": 1},
+    }, {
+        "type": "paragraph",
+        "content": {
+            "paragraph_content": [{
+                "type": "text",
+                "content": (
+                    "brownies for $3 a slice and cheesecakes for$4 a slice. "
+                    r"Each is \$ \$3. $\[ 3 \times 43 = 129$ "
+                    r"Then \[\[4 \times 23 = 92 \]"
+                ),
+            }],
+        },
+    }]]
+
+    ir = blocks_to_ir(pages)
+    paragraph = next(block for block in ir if isinstance(block, Paragraph))
+    assert [type(run) for run in paragraph.runs] == [TextRun]
+
+    tex = render_ir_to_tex(ir)
+    assert r"\$3 a slice" in tex
+    assert r"\textbackslash{}[" in tex
 
 
 def test_create_translated_tex_from_ir_returns_iterable_repairs(tmp_path):

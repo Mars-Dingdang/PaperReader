@@ -79,6 +79,12 @@ def _default_config() -> MinerUConfig:
 
 
 _PDF_LAYER_WHITESPACE_PATTERN = re.compile(r"[ \t]+")
+_PDF_LAYER_GLYPH_TRANSLATION = str.maketrans({
+    "\uf8ee": "[",
+    "\uf8f0": "",
+    "\uf8f9": "]",
+    "\uf8fb": "",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +92,7 @@ _PDF_LAYER_WHITESPACE_PATTERN = re.compile(r"[ \t]+")
 # ---------------------------------------------------------------------------
 
 def _clean_pdf_layer_text(text: str) -> str:
+    text = text.translate(_PDF_LAYER_GLYPH_TRANSLATION)
     lines = [_PDF_LAYER_WHITESPACE_PATTERN.sub(" ", line).strip() for line in text.splitlines()]
     kept = [line for line in lines if line]
     return "\n".join(kept).strip()
