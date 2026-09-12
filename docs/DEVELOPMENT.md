@@ -1163,7 +1163,13 @@ docker compose up --build
   - `PATCH /api/document/{document_id}`
   - `DELETE /api/document/{document_id}` — 软删除当前用户的一条历史记录
   - `POST /api/document/{document_id}/retry` — 重新排队失败文档，从最近校验点续跑
-  - `GET /api/document/{document_id}/locate-counterpart`
+  - `POST /api/document/{document_id}/locate-counterpart` — 双语对应定位，返回 `highlight_text` 用于片段级高亮
+  - `GET|POST /api/document/{document_id}/annotations`、`DELETE /api/document/{document_id}/annotations/{id}` — 持久化批注
+  - `GET /api/document/{document_id}/notes.md` — 导出双语 Markdown 阅读笔记
+  - `PATCH /api/document/{document_id}/progress` — 保存阅读位置（`last_read_page` / `last_read_ratio`）
+  - `GET /api/document/{document_id}/structure` — 后端解析的章节目录与图表列表
+  - `GET /api/document/{document_id}/bibtex` — BibTeX 导出（TeX 工程优先返回工程内 `.bib`）
+  - `GET /api/search?q=` — 跨文档全文搜索
 - **项目（TeX 工程）**
   - `POST /api/project` — 创建 TeX 项目
   - `GET /api/project/{project_id}` — 查看文件与主文件候选
@@ -1180,7 +1186,8 @@ docker compose up --build
   - `POST /api/document/{document_id}/tex` — 保存修改后重新编译（源文件先经 `latex_sanitizer` 清洗，并启用 strict→`-f` 降级编译）
   - `POST /api/document/{document_id}/tex/reveal` — 在系统文件管理器中显示产物
 - **对话**
-  - `POST /api/chat`
+  - `POST /api/chat` — 阻塞式回答（保留兼容）；请求体可带 `quote` 注入选中文本的双语上下文
+  - `POST /api/chat/stream` — SSE 流式回答（`meta` / `delta` / `done` / `error` 事件）
   - `POST /api/chat/sessions`
   - `GET /api/chat/sessions`
   - `GET /api/chat/sessions/{session_id}`
