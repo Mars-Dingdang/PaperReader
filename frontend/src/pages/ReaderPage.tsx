@@ -4,17 +4,24 @@ import { AlertCircle, PanelLeftOpen, PanelRightOpen, UploadCloud } from 'lucide-
 import { ChatPanel } from '../components/ChatPanel'
 import { LiteratureChatPage } from '../components/LiteratureChatPage'
 import { PdfPane } from '../components/PdfPane'
-import type { PdfPaneHandle } from '../components/PdfPane'
+import type { AnnotationItem, PdfPaneHandle } from '../components/PdfPane'
+import type { FigureItem } from '../lib/api'
+import type { OutlineItem } from '../lib/pdfOutline'
 import { ProgressBar } from '../components/ProgressBar'
 import { ProfileModal } from '../components/ProfileModal'
 import { ProjectDrawer } from '../components/ProjectDrawer'
 import { ReviewModal } from '../components/ReviewModal'
 import { Sidebar } from '../components/Sidebar'
 import { TexEditorModal } from '../components/TexEditorModal'
-import type { ArtifactItem, AuthUser, DocumentStatus, DocumentSummary, UserSettings } from '../lib/api'
+import type { ArtifactItem, AuthUser, DocumentStatus, DocumentSummary, SourceRefItem, UserSettings } from '../lib/api'
 import {
+  createAnnotation,
+  deleteAnnotation,
   deleteDocument,
+  downloadNotes,
   getDocumentStatus,
+  getDocumentStructure,
+  listAnnotations,
   listDocuments,
   logout,
   locateCounterpart,
@@ -22,11 +29,15 @@ import {
   renameDocument,
   retryDocument,
   translatedPdfName,
+  updateReadingProgress,
   updateSettings,
   uploadFile
 } from '../lib/api'
 
 type OverridePdf = { url: string; name: string } | null
+type PaneSide = 'original' | 'translated'
+type PendingLocate = { text: string; side: 'original' | 'translated' } | null
+type PendingQuote = { text: string; nonce: number } | null
 
 type Props = {
   user: AuthUser
@@ -55,11 +66,19 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
   const [notice, setNotice] = useState<string | null>(null)
   const [retrying, setRetrying] = useState(false)
   const [pollRevision, setPollRevision] = useState(0)
+  const [annotations, setAnnotations] = useState<AnnotationItem[]>([])
+  const [structureOutline, setStructureOutline] = useState<OutlineItem[] | null>(null)
+  const [structureFigures, setStructureFigures] = useState<FigureItem[]>([])
+  const [syncScroll, setSyncScroll] = useState(true)
+  const [pendingQuote, setPendingQuote] = useState<PendingQuote>(null)
+  const [pendingLocate, setPendingLocate] = useState<PendingLocate>(null)
+  const [activePane, setActivePane] = useState<PaneSide>('original')
 
   const pollTimerRef = useRef<number | null>(null)
   const originalPaneRef = useRef<PdfPaneHandle | null>(null)
   const translatedPaneRef = useRef<PdfPaneHandle | null>(null)
   const emptyUploadRef = useRef<HTMLInputElement | null>(null)
+  const syncLockRef = useRef<{ side: PaneSide; until: number }>({ side: 'original', until: 0 })
 
   useEffect(() => {
     setTheme(user.settings.theme)
@@ -208,7 +227,151 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
   useEffect(() => {
     setOverrideLeft(null)
     setOverrideRight(null)
+    setAnnotations([])
+    setStructureOutline(null)
+    setStructureFigures([])
+    setPendingQuote(null)
   }, [activeId])
+
+  // Annotations and the document structure (backend outline + figure gallery)
+  // are per-document; reload them whenever the active document changes and
+  // again once its pipeline finishes.
+  const annotationsDocIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!activeId || activeDoc?.status !== 'done') return
+    if (annotationsDocIdRef.current === activeId) return
+    annotationsDocIdRef.current = activeId
+    void listAnnotations(activeId).then(setAnnotations).catch((e) => console.error(e))
+    void getDocumentStructure(activeId)
+      .then((structure) => {
+        setStructureOutline(structure.outline?.length ? structure.outline : null)
+        setStructureFigures(
+          (structure.figures || []).map((figure) => ({ ...figure, url: makeDataUrl(figure.url) }))
+        )
+      })
+      .catch((e) => console.error(e))
+  }, [activeId, activeDoc?.status])
+
+  const handleCreateAnnotation = useCallback(async (payload: {
+    page: number
+    quote: string
+    color: string
+    note: string
+    positionRatio: number
+  }) => {
+    if (!activeId) return
+    try {
+      await createAnnotation(activeId, {
+        page: payload.page,
+        quote: payload.quote,
+        color: payload.color,
+        note: payload.note,
+        position_ratio: payload.positionRatio
+      })
+      setAnnotations(await listAnnotations(activeId))
+    } catch (e: any) {
+      setNotice(`批注保存失败：${e?.message ?? String(e)}`)
+    }
+  }, [activeId])
+
+  const handleDeleteAnnotation = useCallback(async (id: string) => {
+    if (!activeId) return
+    try {
+      await deleteAnnotation(activeId, id)
+      setAnnotations((prev) => prev.filter((item) => item.id !== id))
+    } catch (e: any) {
+      setNotice(`批注删除失败：${e?.message ?? String(e)}`)
+    }
+  }, [activeId])
+
+  const handleExportNotes = useCallback(() => {
+    if (!activeId) return
+    void downloadNotes(activeId).catch((e: any) => setNotice(`导出笔记失败：${e?.message ?? String(e)}`))
+  }, [activeId])
+
+  const handleProgressChange = useCallback((page: number, ratio: number) => {
+    if (!activeId) return
+    void updateReadingProgress(activeId, page, ratio).catch(() => {})
+  }, [activeId])
+
+  const handlePaneScrollRatio = useCallback((side: PaneSide, ratio: number) => {
+    if (!syncScroll) return
+    const now = Date.now()
+    if (syncLockRef.current.side === side && now < syncLockRef.current.until) return
+    const target = side === 'original' ? translatedPaneRef.current : originalPaneRef.current
+    if (!target) return
+    syncLockRef.current = { side: side === 'original' ? 'translated' : 'original', until: now + 600 }
+    target.scrollToRatio(ratio)
+  }, [syncScroll])
+
+  const handleAskAI = useCallback((_side: PaneSide, payload: { selectedText: string }) => {
+    setShowChat(true)
+    setLiteratureChatOpen(false)
+    setPendingQuote({ text: payload.selectedText, nonce: Date.now() })
+  }, [])
+
+  // Ctrl/Cmd+F opens in-document search on the pane the user last touched.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f') return
+      event.preventDefault()
+      const pane = activePane === 'original' ? originalPaneRef.current : translatedPaneRef.current
+      pane?.openSearch()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [activePane])
+
+  const handleLocateCounterpart = useCallback(async (
+    sourceSide: 'original' | 'translated',
+    payload: { selectedText: string; page: number; pageCount: number }
+  ) => {
+    if (!activeId) return
+    try {
+      const located = await locateCounterpart({
+        documentId: activeId,
+        source_side: sourceSide,
+        selected_text: payload.selectedText,
+        source_page: payload.page,
+        source_page_count: payload.pageCount,
+      })
+      const target = sourceSide === 'original' ? translatedPaneRef.current : originalPaneRef.current
+      await target?.locateAndHighlight({
+        text: located.target_text,
+        highlightText: located.highlight_text,
+        positionRatio: located.position_ratio,
+      })
+    } catch (e: any) {
+      alert(`未能定位对应内容：${e?.message ?? String(e)}`)
+    }
+  }, [activeId])
+
+  // A library-search hit opens its document and highlights the matched text
+  // once the document is available.
+  useEffect(() => {
+    if (!pendingLocate || !activeDoc || activeDoc.status !== 'done') return
+    const { text, side } = pendingLocate
+    setPendingLocate(null)
+    void handleLocateCounterpart(side === 'original' ? 'translated' : 'original', {
+      selectedText: text,
+      page: 1,
+      pageCount: 1,
+    })
+  }, [pendingLocate, activeDoc, handleLocateCounterpart])
+
+  // Chat citation badge: jump to the cited passage, switching documents if
+  // the citation points at another paper in the library.
+  const handleCitationJump = useCallback((source: SourceRefItem) => {
+    if (!source.document_id) return
+    const snippet = source.content.slice(0, 400)
+    if (source.document_id === activeId) {
+      void handleLocateCounterpart('translated', { selectedText: snippet, page: 1, pageCount: 1 })
+      return
+    }
+    setActiveId(source.document_id)
+    setLiteratureChatOpen(false)
+    setPendingLocate({ text: snippet, side: 'original' })
+  }, [activeId, handleLocateCounterpart])
 
   const handleUpload = useCallback(async (file: File) => {
     setUploading(true)
@@ -273,29 +436,6 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
       alert(`重命名失败：${e?.message ?? String(e)}`)
     }
   }, [refreshSummaries])
-
-  const handleLocateCounterpart = useCallback(async (
-    sourceSide: 'original' | 'translated',
-    payload: { selectedText: string; page: number; pageCount: number }
-  ) => {
-    if (!activeId) return
-    try {
-      const located = await locateCounterpart({
-        documentId: activeId,
-        source_side: sourceSide,
-        selected_text: payload.selectedText,
-        source_page: payload.page,
-        source_page_count: payload.pageCount,
-      })
-      const target = sourceSide === 'original' ? translatedPaneRef.current : originalPaneRef.current
-      await target?.locateAndHighlight({
-        text: located.target_text,
-        positionRatio: located.position_ratio,
-      })
-    } catch (e: any) {
-      alert(`未能定位对应内容：${e?.message ?? String(e)}`)
-    }
-  }, [activeId])
 
   const handleOpenInPane = useCallback((artifact: ArtifactItem) => {
     if (!artifact.url) return
@@ -369,6 +509,13 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
           onRefreshStatus={refreshActive}
           onOpenLiteratureChat={() => setLiteratureChatOpen(true)}
           literatureChatOpen={literatureChatOpen}
+          onSearchLocate={(hit) => {
+            if (hit.document_id !== activeId) {
+              setActiveId(hit.document_id)
+              setLiteratureChatOpen(false)
+            }
+            setPendingLocate({ text: hit.snippet, side: hit.side })
+          }}
         />
       ) : (
         <button
@@ -427,6 +574,19 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
                 downloadName={activeDoc?.source_filename}
                 counterpartLabel="右侧译文"
                 onLocateCounterpart={(payload) => void handleLocateCounterpart('original', payload)}
+                onAskAI={(payload) => handleAskAI('original', payload)}
+                annotations={annotations}
+                onCreateAnnotation={handleCreateAnnotation}
+                onDeleteAnnotation={handleDeleteAnnotation}
+                onExportNotes={handleExportNotes}
+                initialPosition={activeDoc ? { page: activeDoc.last_read_page, ratio: activeDoc.last_read_ratio } : null}
+                onProgressChange={handleProgressChange}
+                onUserScrollRatio={(ratio) => handlePaneScrollRatio('original', ratio)}
+                syncEnabled={syncScroll}
+                onToggleSync={() => setSyncScroll((v) => !v)}
+                figures={structureFigures}
+                outline={structureOutline}
+                onActivate={() => setActivePane('original')}
               />
             </Panel>
             <PanelResizeHandle className="resize-handle" />
@@ -442,6 +602,19 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
                 downloadName={translatedName}
                 counterpartLabel="左侧原文"
                 onLocateCounterpart={(payload) => void handleLocateCounterpart('translated', payload)}
+                onAskAI={(payload) => handleAskAI('translated', payload)}
+                annotations={annotations}
+                onCreateAnnotation={handleCreateAnnotation}
+                onDeleteAnnotation={handleDeleteAnnotation}
+                onExportNotes={handleExportNotes}
+                initialPosition={activeDoc ? { page: activeDoc.last_read_page, ratio: activeDoc.last_read_ratio } : null}
+                onProgressChange={handleProgressChange}
+                onUserScrollRatio={(ratio) => handlePaneScrollRatio('translated', ratio)}
+                syncEnabled={syncScroll}
+                onToggleSync={() => setSyncScroll((v) => !v)}
+                figures={structureFigures}
+                outline={structureOutline}
+                onActivate={() => setActivePane('translated')}
               />
             </Panel>
             {showChat && (
@@ -452,6 +625,9 @@ export function ReaderPage({ user, onUserChange, onLogout }: Props) {
                     documentId={activeId}
                     references={chatRefs}
                     onCollapse={() => setShowChat(false)}
+                    pendingQuote={pendingQuote}
+                    onQuoteConsumed={() => setPendingQuote(null)}
+                    onCitationJump={handleCitationJump}
                   />
                 </Panel>
               </>

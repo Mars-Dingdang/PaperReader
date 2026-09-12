@@ -5,8 +5,8 @@ import remarkMath from 'remark-math'
 import remarkBreaks from 'remark-breaks'
 import rehypeKatex from 'rehype-katex'
 import { BookOpen, PanelRightClose, Plus, Send, X } from 'lucide-react'
-import type { ChatSession, ReferenceItem } from '../lib/api'
-import { createChatSession, listChatSessions, sendChat } from '../lib/api'
+import type { ChatSession, ReferenceItem, SourceRefItem } from '../lib/api'
+import { createChatSession, listChatSessions, sendChat, streamChat } from '../lib/api'
 
 type Props = {
   documentId?: string
@@ -17,6 +17,9 @@ type Props = {
   title?: string
   greeting?: string
   className?: string
+  pendingQuote?: { text: string; nonce: number } | null
+  onQuoteConsumed?: () => void
+  onCitationJump?: (source: SourceRefItem) => void
 }
 
 type Msg = { role: 'user' | 'assistant'; content: string; ts: number }
@@ -27,6 +30,22 @@ const TEMPLATE_PROMPTS = [
   { key: 'limitations', label: 'Limitations', prompt: 'Please extract and summarize the paper limitations, including explicit limitations and potential hidden risks.' }
 ]
 
+// Splits an answer into markdown segments and 【P1】/[P1]-style citation
+// markers so the markers can render as clickable badges.
+function splitCitations(content: string): Array<{ type: 'text' | 'cite'; value: string }> {
+  const parts: Array<{ type: 'text' | 'cite'; value: string }> = []
+  const pattern = /([【\[])(P\d+|W\d+)([】\]])/g
+  let last = 0
+  for (const match of content.matchAll(pattern)) {
+    const at = match.index ?? 0
+    if (at > last) parts.push({ type: 'text', value: content.slice(last, at) })
+    parts.push({ type: 'cite', value: match[2] })
+    last = at + match[0].length
+  }
+  if (last < content.length) parts.push({ type: 'text', value: content.slice(last) })
+  return parts
+}
+
 export function ChatPanel({
   documentId,
   documentIds,
@@ -36,17 +55,23 @@ export function ChatPanel({
   title = 'Paper Chat',
   greeting,
   className = '',
+  pendingQuote,
+  onQuoteConsumed,
+  onCitationJump,
 }: Props) {
   const [message, setMessage] = useState('')
   const [history, setHistory] = useState<Msg[]>([])
   const [loading, setLoading] = useState(false)
+  const [streamingText, setStreamingText] = useState<string | null>(null)
   const [showRefs, setShowRefs] = useState(false)
   const [selectedReference, setSelectedReference] = useState<ReferenceItem | null>(null)
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | undefined>()
   const [sessionsLoading, setSessionsLoading] = useState(false)
+  const [sources, setSources] = useState<SourceRefItem[]>([])
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
   const selectedDocumentIds = useMemo(
     () => documentIds?.length ? documentIds : (documentId ? [documentId] : []),
@@ -74,9 +99,18 @@ export function ChatPanel({
     return () => { cancelled = true }
   }, [documentId, scope])
 
+  // A reader selection arrived: quote it into the input box.
+  useEffect(() => {
+    if (!pendingQuote) return
+    const quoted = pendingQuote.text.length > 400 ? `${pendingQuote.text.slice(0, 400)}…` : pendingQuote.text
+    setMessage((prev) => (prev ? `${prev}\n` : '') + `关于这段内容：\n> ${quoted}\n\n`)
+    textareaRef.current?.focus()
+    onQuoteConsumed?.()
+  }, [pendingQuote, onQuoteConsumed])
+
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [history, loading])
+  }, [history, loading, streamingText])
 
   const refCountLabel = useMemo(() => `References · ${references.length}`, [references])
 
@@ -115,6 +149,7 @@ export function ChatPanel({
     setHistory((h) => [...h, { role: 'user', content: text, ts: Date.now() }])
     setMessage('')
     setLoading(true)
+    setStreamingText('')
     try {
       if (!sessionId) {
         const created = await createChatSession({ scope, document_ids: selectedDocumentIds })
@@ -122,14 +157,18 @@ export function ChatPanel({
         setActiveSessionId(sessionId)
         setSessions((items) => [created, ...items])
       }
-      const response = await sendChat({
+      const payload = {
         document_id: scope === 'document' ? documentId : undefined,
         document_ids: selectedDocumentIds,
         scope,
         session_id: sessionId,
         message: text,
+      }
+      const response = await streamChat(payload, {
+        onDelta: (delta) => setStreamingText((prev) => (prev ?? '') + delta),
       })
       setActiveSessionId(response.session_id)
+      setSources(response.sources ?? [])
       setHistory((h) => [...h, { role: 'assistant', content: response.answer, ts: Date.now() }])
       setSessions((items) => items.map((item) => item.session_id === response.session_id
         ? {
@@ -151,7 +190,39 @@ export function ChatPanel({
       ])
     } finally {
       setLoading(false)
+      setStreamingText(null)
     }
+  }
+
+  const renderAnswer = (content: string) => {
+    const parts = splitCitations(content)
+    return parts.map((part, index) => {
+      if (part.type === 'text') {
+        return (
+          <ReactMarkdown
+            key={index}
+            remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
+            rehypePlugins={[rehypeKatex]}
+          >
+            {part.value}
+          </ReactMarkdown>
+        )
+      }
+      const source = sources.find((item) => item.label === part.value)
+      const jumpable = Boolean(source && onCitationJump && source.document_id)
+      return (
+        <button
+          key={index}
+          className={`citation-badge ${jumpable ? 'jumpable' : ''}`}
+          title={source ? `${source.title}${jumpable ? ' · 点击跳转原文' : ''}` : part.value}
+          onClick={() => {
+            if (jumpable && source) onCitationJump?.(source)
+          }}
+        >
+          {part.value}
+        </button>
+      )
+    })
   }
 
   return (
@@ -208,7 +279,7 @@ export function ChatPanel({
       </div>
 
       <div className="chat-log" ref={scrollRef}>
-        {history.length === 0 && (
+        {history.length === 0 && !streamingText && (
           <div className="chat-empty muted">
             {selectedDocumentIds.length > 0
               ? (greeting || '选择上方模板或直接提问，开始与论文对话。')
@@ -219,22 +290,41 @@ export function ChatPanel({
           <div key={idx} className={`bubble-row ${m.role}`}>
             <div className={`bubble ${m.role}`}>
               <div className="prose">
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
-                  rehypePlugins={[rehypeKatex]}
-                >
-                  {m.content}
-                </ReactMarkdown>
+                {m.role === 'assistant' ? renderAnswer(m.content) : (
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
+                    rehypePlugins={[rehypeKatex]}
+                  >
+                    {m.content}
+                  </ReactMarkdown>
+                )}
               </div>
             </div>
           </div>
         ))}
         {loading && (
-          <div className="bubble-row assistant">
-            <div className="bubble assistant typing">
-              <span /><span /><span />
-            </div>
-          </div>
+          streamingText
+            ? (
+              <div className="bubble-row assistant">
+                <div className="bubble assistant streaming">
+                  <div className="prose">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
+                      rehypePlugins={[rehypeKatex]}
+                    >
+                      {streamingText}
+                    </ReactMarkdown>
+                  </div>
+                </div>
+              </div>
+            )
+            : (
+              <div className="bubble-row assistant">
+                <div className="bubble assistant typing">
+                  <span /><span /><span />
+                </div>
+              </div>
+            )
         )}
       </div>
 
@@ -273,6 +363,7 @@ export function ChatPanel({
 
       <div className="chat-input">
         <textarea
+          ref={textareaRef}
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           rows={3}

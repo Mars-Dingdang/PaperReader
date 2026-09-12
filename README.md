@@ -1,12 +1,12 @@
-# PaperReader v2.1.8
+# PaperReader v2.1.9
 
 English | [简体中文](docs/zh-cn/README.zh-cn.md)
 
-[Download Windows / macOS v2.1.8](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.8) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.8.md)
+[Download Windows / macOS v2.1.9](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.9) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.9.md)
 
 > 📖 **Please read the [User Guide (中文)](docs/user_instruction.md) before downloading.** It covers installation (including the Windows "unblock ZIP" step that prevents most launch failures), first-run provider setup, paper submission, history, artifacts, and AI chat.
 
-v2.1.8 aligns the LaTeX pipeline with the PDF pipeline — multi-file TeX projects are flattened before translation, translation reports per-chunk progress, and a failed run resumes from its chunk checkpoint instead of starting over. See the [release notes](docs/releases/v2.1.8.md) for details. Frontend/API package version: `2.1.8`.
+v2.1.9 upgrades the reader itself: in-document search, persistent annotations with Markdown note export, reading-position memory, synced dual-pane scrolling, streamed AI answers with clickable citations, library-wide full-text search, BibTeX export, and a figure gallery — on top of a PDF renderer that now loads pages on demand. See the [release notes](docs/releases/v2.1.9.md) for details. Frontend/API package version: `2.1.9`.
 
 ![](./images/demo1.png)
 
@@ -29,7 +29,15 @@ PaperReader is a full-stack bilingual paper-reading app. Upload a PDF or a LaTeX
 - Concurrent LLM translation with validated per-chunk checkpoints and automatic retry; failed documents resume from the last checkpoint instead of starting over
 - Four-layer LaTeX failure prevention: prose sanitizer → strict-then-fallback compile → bounded model repair → in-browser manual TeX editor
 - Optional vision-model adversarial check on each page (auto / manual review modes, off by default)
-- Side-by-side original/translated PDF reader with generated outlines, selectable text, trackpad zoom, and a progress bar with stage breakdown, ETA, and failure diagnosis
+- Side-by-side original/translated PDF reader with outlines (bookmarks or backend-parsed section structure), selectable text, trackpad zoom, on-demand page rendering, and a progress bar with stage breakdown, ETA, and failure diagnosis
+- In-document search (Ctrl/Cmd+F) with match navigation across the whole file
+- Persistent colored annotations with optional notes, restored on reopen, exportable as a bilingual Markdown reading-notes file
+- Reading-position memory: reopen a document where you left off
+- Optional synced dual-pane scrolling driven by the bilingual alignment index; counterpart highlighting lands near the passage you selected instead of always at the start of the block
+- Figure gallery: every parsed figure and table as a thumbnail strip that jumps to its page
+- Selection menu with "ask AI" that grounds the answer in the selected passage and its neighbors; streamed answers with clickable citation badges that jump back to the source text
+- Library-wide full-text search across all parsed documents, opening the match at its location
+- Paper metadata (title/authors/year/venue) via Semantic Scholar with one-click BibTeX export — or the project's own `.bib` for LaTeX submissions
 - Artifact panel with reference preview and drag-into-PDF-pane, plus template prompts (Highlight / Baseline / Limitations)
 - AI chat with paper context via any OpenAI-compatible API; Markdown, GitHub-flavored tables, and KaTeX math in both bubbles
 - Light / dark theme persisted per account

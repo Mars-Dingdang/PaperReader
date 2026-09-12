@@ -79,6 +79,8 @@ class DocumentStatusResponse(BaseModel):
     last_compile_warning: str | None = None
     failure: FailureItem | None = None
     latex_recovery: LatexRecoveryItem | None = None
+    last_read_page: int = 0
+    last_read_ratio: float = 0.0
 
 
 class ChatRequest(BaseModel):
@@ -87,14 +89,24 @@ class ChatRequest(BaseModel):
     scope: str = "document"
     session_id: str | None = None
     message: str
+    quote: str | None = None
     override_api_key: str | None = None
     override_base_url: str | None = None
     override_model: str | None = None
 
 
+class SourceRefItem(BaseModel):
+    label: str
+    title: str = ""
+    content: str = ""
+    document_id: str | None = None
+    position_ratio: float | None = None
+
+
 class ChatResponse(BaseModel):
     answer: str
     session_id: str
+    sources: list[SourceRefItem] = []
 
 
 class ChatMessageItem(BaseModel):
@@ -136,6 +148,7 @@ class LocateCounterpartResponse(BaseModel):
     position_ratio: float
     confidence: float = 0.0
     alignment_method: str = ""
+    highlight_text: str = ""
 
 
 class DocumentSummary(BaseModel):
@@ -148,3 +161,28 @@ class DocumentSummary(BaseModel):
     updated_at: str | None = None
     last_opened_at: str | None = None
     has_translated_pdf: bool = False
+    title: str = ""
+    year: str = ""
+
+
+class AnnotationItem(BaseModel):
+    id: str
+    page: int
+    quote: str
+    color: str = "yellow"
+    note: str = ""
+    position_ratio: float = 0.0
+    created_at: str = ""
+
+
+class CreateAnnotationRequest(BaseModel):
+    page: int
+    quote: str
+    color: str = "yellow"
+    note: str = ""
+    position_ratio: float = 0.0
+
+
+class UpdateProgressRequest(BaseModel):
+    page: int = 1
+    ratio: float = 0.0

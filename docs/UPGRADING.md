@@ -1,5 +1,15 @@
 # Upgrading PaperReader
 
+## Upgrading from v2.1.8 to v2.1.9
+
+PaperReader v2.1.9 is backward compatible and requires no manual data migration. Keep the existing `DATA_DIR`, database, `AUTH_SECRET_KEY`, provider settings, and TeX Live installation. On first start, SQLite adds three columns to `documents` (`last_read_page`, `last_read_ratio`, `metadata_json`) and a new `annotations` table; existing documents simply start with an empty reading position, no annotations, and no metadata.
+
+New capabilities are all opt-in by use rather than by configuration: Ctrl/Cmd+F searches inside the loaded PDF; selected text offers highlight colors, an optional note, and "问 AI"; annotations persist per account and export as a Markdown notes file; the reader restores the last page on reopen; the link icon in each pane toolbar toggles synced dual-pane scrolling; the sidebar search box runs full-text search across every parsed document; a document's context menu offers BibTeX export (from Semantic Scholar metadata for PDFs, or the project's own `.bib` for LaTeX submissions); the images icon in a pane toolbar opens the figure gallery. Chat answers now stream token by token over SSE (`POST /api/chat/stream`); the previous blocking `POST /api/chat` remains for compatibility. The bilingual locate endpoint returns an additional `highlight_text` so the counterpart highlight lands on the sentence matching the selection instead of the start of the whole block.
+
+The PDF renderer now mounts pages lazily around the viewport instead of rendering every page up front, which lowers memory use and first paint on long papers; highlights, search hits, and annotations are re-applied automatically when a page scrolls back into view. Outline generation prefers the section structure produced during parsing (MinerU content list or extraction checkpoint) and falls back to the previous text-layer heuristic only when no structure is available.
+
+Frontend, package-lock root metadata, API, desktop guides, and release notes are synchronized to `2.1.9`; the Git tag is `v2.1.9`.
+
 ## Upgrading from v2.1.7 to v2.1.8
 
 PaperReader v2.1.8 is backward compatible and requires no data migration. Keep the existing `DATA_DIR`, database, `AUTH_SECRET_KEY`, provider settings, and TeX Live installation.

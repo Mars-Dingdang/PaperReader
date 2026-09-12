@@ -32,7 +32,7 @@ from app.models.store import (
     touch_document_opened,
     translated_pdf_filename,
 )
-from app.services.alignment_service import load_alignment_entries, locate_in_alignment
+from app.services.alignment_service import load_alignment_entries, locate_in_alignment, proportional_highlight
 from app.services.auth_service import User, ensure_user_settings
 from app.services.document_pipeline import process_document
 
@@ -96,6 +96,8 @@ def list_documents(
             size_bytes=record.size_bytes,
             created_at=record.created_at.isoformat() if record.created_at else None,
             has_translated_pdf=bool(record.translated_pdf_url),
+            title=str(record.metadata.get("title") or ""),
+            year=str(record.metadata.get("year") or ""),
         )
         for record in list_documents_for_user(user.id)
     ]
@@ -155,6 +157,8 @@ def get_document(
             if record.latex_recovery
             else None
         ),
+        last_read_page=record.last_read_page,
+        last_read_ratio=record.last_read_ratio,
     )
 
 
@@ -240,7 +244,7 @@ def locate_counterpart(
 
     entries, alignment_method = load_alignment_entries(record)
     if entries:
-        target_text, position_ratio, confidence, _ = locate_in_alignment(
+        target_text, position_ratio, confidence, _, highlight_text = locate_in_alignment(
             entries,
             source_side=payload.source_side,
             selected_text=payload.selected_text,
@@ -252,6 +256,7 @@ def locate_counterpart(
                 position_ratio=position_ratio,
                 confidence=confidence,
                 alignment_method=alignment_method,
+                highlight_text=highlight_text,
             )
         raise HTTPException(
             status_code=422,
@@ -269,11 +274,15 @@ def locate_counterpart(
     # Strip lightweight Markdown so PDF text-layer matching is more reliable.
     target_text = re.sub(r"[#*_`]+", "", target_text)
     target_text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", target_text)
+    target_text = " ".join(target_text.split())[:1200]
     return LocateCounterpartResponse(
-        target_text=" ".join(target_text.split())[:1200],
+        target_text=target_text,
         position_ratio=max(0.0, min(1.0, block_ratio)),
         confidence=0.0,
         alignment_method="legacy_ratio",
+        highlight_text=proportional_highlight(
+            source_blocks[source_index], payload.selected_text, target_text
+        ),
     )
 
 

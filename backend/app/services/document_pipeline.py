@@ -13,6 +13,7 @@ from app.models.store import (
     LatexRecoveryEntry,
     ReferenceEntry,
     save_document,
+    set_document_metadata,
     translated_pdf_filename,
 )
 from app.services.latex_service import (
@@ -151,6 +152,27 @@ def _derive_display_title(source_filename: str, extracted_text: str) -> tuple[st
     if matched:
         return matched.group(1).strip(), False
     return Path(source_filename).stem.strip(), True
+
+
+def _enrich_metadata(record: DocumentRecord, display_title: str) -> None:
+    """Best-effort Semantic Scholar lookup for title/authors/year/venue.
+
+    Failure or a lookup miss leaves the document untouched; the pipeline
+    never depends on this succeeding.
+    """
+    if record.metadata:
+        return
+    try:
+        from app.services.literature_service import fetch_paper_metadata
+
+        metadata = fetch_paper_metadata(display_title)
+    except Exception:
+        metadata = {}
+    if not metadata:
+        return
+    record.metadata = metadata
+    set_document_metadata(record.document_id, metadata)
+    record.logs.append(f"Metadata enriched: {str(metadata.get('title', ''))[:80]}")
 
 
 def _ir_to_translated_markdown(ir_blocks: list) -> str:
@@ -847,6 +869,7 @@ def process_document(
 
                 record.references = _extract_references_from_text(tex_content)
                 record.logs.append(f"References extracted: {len(record.references)}")
+                _enrich_metadata(record, display_title)
 
             with with_stage(record, "translate"):
                 record.logs.append("Translating LaTeX source")
@@ -974,6 +997,7 @@ def process_document(
 
                 record.references = _extract_references_from_text(record.extracted_text)
                 record.logs.append(f"References extracted: {len(record.references)}")
+                _enrich_metadata(record, display_title)
 
             if record.vision_check_enabled:
                 with with_stage(record, "vision_check"):

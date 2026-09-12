@@ -291,33 +291,118 @@ def _entry_score(candidate: str, needle: str) -> float:
     return coverage * 0.92
 
 
+def _match_start_ratio(candidate: str, needle: str) -> float:
+    """Where the best match of ``needle`` starts inside ``candidate`` (0..1)."""
+    if not candidate or not needle:
+        return 0.0
+    if needle in candidate:
+        return candidate.index(needle) / len(candidate)
+    if candidate in needle:
+        return 0.0
+    match = SequenceMatcher(None, needle[:1600], candidate[:4000]).find_longest_match()
+    return match.b / len(candidate)
+
+
+_END_CHARS = "。！？!?\n"
+_SENTENCE_SCAN = 200
+
+
+def _is_sentence_end(target: str, index: int) -> bool:
+    if target[index] in _END_CHARS:
+        return True
+    if target[index] == "." and (
+        index + 1 >= len(target) or target[index + 1].isspace()
+    ):
+        return True
+    return False
+
+
+def _sentence_start(target: str, pos: int) -> int:
+    """Move ``pos`` back to the first character after the previous sentence end."""
+    pos = min(pos, len(target))
+    window = max(0, pos - _SENTENCE_SCAN)
+    if pos <= 0:
+        return 0
+    if _is_sentence_end(target, pos - 1):
+        return pos
+    for index in range(pos - 1, window - 1, -1):
+        if _is_sentence_end(target, index):
+            return index + 1
+    return window
+
+
+def _sentence_finish(target: str, start: int, end: int) -> int:
+    """Extend ``end`` forward so the fragment stops at a sentence boundary."""
+    end = min(end, len(target))
+    if end >= len(target) or end <= start or _is_sentence_end(target, end - 1):
+        return end
+    limit = min(len(target), end + _SENTENCE_SCAN)
+    for index in range(end, limit):
+        if _is_sentence_end(target, index):
+            return index + 1
+    return end
+
+
+def _highlight_span(target: str, start_ratio: float, span_ratio: float) -> str:
+    """Slice the sentence-bounded fragment of ``target`` covering the
+    proportional window implied by the user's selection inside its block."""
+    if not target:
+        return ""
+    if start_ratio <= 0.02 and span_ratio >= 0.85:
+        return target
+    length = max(int(span_ratio * len(target)), min(40, len(target) // 4))
+    start = _sentence_start(target, round(start_ratio * len(target)))
+    end = _sentence_finish(target, start, start + length)
+    fragment = target[start:end].strip()
+    if len(fragment) >= 0.95 * len(target):
+        return target
+    return fragment
+
+
+def proportional_highlight(
+    source_text: str, selected_text: str, target_text: str
+) -> str:
+    """Map the selected fragment's position inside its source block onto the
+    counterpart block, so the highlight lands near the matching part instead
+    of always at the start of the block."""
+    candidate = _normalize(source_text)
+    needle = _normalize(selected_text)
+    if not candidate or not needle or not target_text:
+        return ""
+    span_ratio = min(1.0, len(needle) / max(1, len(candidate)))
+    return _highlight_span(target_text, _match_start_ratio(candidate, needle), span_ratio)
+
+
 def locate_in_alignment(
     entries: list[dict], *, source_side: str, selected_text: str, page_ratio: float
-) -> tuple[str, float, float, int]:
+) -> tuple[str, float, float, int, str]:
     source_key = "original" if source_side == "original" else "translated"
     target_key = "translated" if source_side == "original" else "original"
     needle = _normalize(selected_text)[:1600]
     if not entries:
-        return "", page_ratio, 0.0, 0
+        return "", page_ratio, 0.0, 0, ""
 
-    scored: list[tuple[float, int]] = []
+    # Lexical match quality decides; page position only breaks ties between
+    # equally good candidates (e.g. repeated phrases across sections).
+    scored: list[tuple[float, float, int]] = []
     for index, entry in enumerate(entries):
         candidate = _normalize(str(entry.get(source_key) or ""))
         lexical = _entry_score(candidate, needle)
         position = float(entry.get("position", index / max(1, len(entries) - 1)))
-        # Page position is only a tie-breaker.  It must never choose the target
-        # by itself once selected text was matched.
-        score = lexical - abs(position - page_ratio) * 0.015
-        scored.append((score, index))
-    best_score, best_index = max(scored, key=lambda item: item[0])
-    confidence = max(0.0, min(1.0, best_score))
+        scored.append((lexical, abs(position - page_ratio), index))
+    best_lexical = max(item[0] for item in scored)
+    _, best_distance, best_index = min(
+        (item for item in scored if item[0] >= best_lexical - 0.02),
+        key=lambda item: (item[1], item[2]),
+    )
+    confidence = max(0.0, min(1.0, best_lexical))
     if confidence < 0.55:
-        best_index = min(
-            range(len(entries)),
-            key=lambda idx: abs(float(entries[idx].get("position", 0.0)) - page_ratio),
-        )
         confidence = 0.0
     best = entries[best_index]
     position = float(best.get("position", best_index / max(1, len(entries) - 1)))
     target = _plain_target(str(best.get(target_key) or ""))
-    return target[:1600], max(0.0, min(1.0, position)), confidence, best_index
+    highlight = ""
+    if confidence >= 0.55:
+        source_text = str(best.get(source_key) or "")
+        highlight = proportional_highlight(source_text, selected_text, target)
+    return target[:1600], max(0.0, min(1.0, position)), confidence, best_index, highlight

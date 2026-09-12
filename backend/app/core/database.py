@@ -148,10 +148,32 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             "failure_json": "TEXT",
             "retry_count": "INTEGER NOT NULL DEFAULT 0",
             "latex_recovery_json": "TEXT",
+            "last_read_page": "INTEGER NOT NULL DEFAULT 0",
+            "last_read_ratio": "REAL NOT NULL DEFAULT 0",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
         }
         for column, declaration in document_migrations.items():
             if column not in existing_document_columns:
                 conn.execute(f"ALTER TABLE documents ADD COLUMN {column} {declaration}")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS annotations (
+                id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                owner_user_id INTEGER NOT NULL,
+                page INTEGER NOT NULL DEFAULT 1,
+                quote TEXT NOT NULL DEFAULT '',
+                color TEXT NOT NULL DEFAULT 'yellow',
+                note TEXT NOT NULL DEFAULT '',
+                position_ratio REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(document_id) REFERENCES documents(document_id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_annotations_document ON annotations(document_id, owner_user_id)"
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS projects (

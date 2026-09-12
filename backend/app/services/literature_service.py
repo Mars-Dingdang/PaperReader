@@ -22,6 +22,8 @@ class RetrievedSource:
     url: str | None = None
     source_type: str = "uploaded"
     year: int | None = None
+    document_id: str | None = None
+    position_ratio: float | None = None
 
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]{2,}|[\u4e00-\u9fff]")
@@ -36,7 +38,8 @@ def _blocks(text: str) -> list[str]:
     return [" ".join(part.split()) for part in parts if len(part.strip()) >= 20]
 
 
-def _rank_blocks(text: str, question: str, limit: int = 3) -> list[str]:
+def _rank_blocks(text: str, question: str, limit: int = 3) -> list[tuple[str, float]]:
+    """Top blocks with their position in the document (0..1) for citations."""
     blocks = _blocks(text)
     if not blocks:
         return []
@@ -49,9 +52,9 @@ def _rank_blocks(text: str, question: str, limit: int = 3) -> list[str]:
         heading_bonus = 0.25 if block.startswith(("#", "摘要", "Abstract")) else 0.0
         ranked.append((overlap + density + heading_bonus, -index, block))
     ranked.sort(reverse=True)
-    selected = [block for _, _, block in ranked[:limit]]
-    if blocks[0] not in selected:
-        selected.insert(0, blocks[0])
+    selected = [(block, index / max(1, len(blocks) - 1)) for _, index, block in ranked[:limit]]
+    if blocks and all(index != 0 for _, index in selected):
+        selected.insert(0, (blocks[0], 0.0))
     return selected[: limit + 1]
 
 
@@ -60,30 +63,33 @@ def retrieve_uploaded_sources(
 ) -> list[RetrievedSource]:
     sources: list[RetrievedSource] = []
     remaining = max_chars
-    for index, record in enumerate(records, start=1):
+    label_index = 0
+    for record in records:
         bilingual = "\n\n".join(
             part for part in (record.translated_text, record.extracted_text) if part
         )
         chunks = _rank_blocks(bilingual, question, limit=3)
         if not chunks:
             continue
-        content = "\n\n".join(chunks)
-        if len(content) > 4200:
-            content = content[:4200]
-        if len(content) > remaining:
-            content = content[: max(0, remaining)]
-        if not content:
-            break
-        remaining -= len(content)
-        sources.append(
-            RetrievedSource(
-                label=f"P{index}",
-                title=record.source_filename or record.document_id,
-                content=content,
+        for chunk, position in chunks:
+            content = chunk[:4200]
+            if len(content) > remaining:
+                content = content[: max(0, remaining)]
+            if not content:
+                break
+            remaining -= len(content)
+            label_index += 1
+            sources.append(
+                RetrievedSource(
+                    label=f"P{label_index}",
+                    title=record.source_filename or record.document_id,
+                    content=content,
+                    document_id=record.document_id,
+                    position_ratio=position,
+                )
             )
-        )
-        if remaining <= 0:
-            break
+            if remaining <= 0:
+                break
     return sources
 
 
@@ -132,6 +138,50 @@ def search_online_literature(question: str, limit: int = 3) -> list[RetrievedSou
             )
         )
     return sources
+
+
+def fetch_paper_metadata(title: str) -> dict:
+    """Look up title/authors/year/venue for a paper on Semantic Scholar.
+
+    Best-effort enrichment for the document list and BibTeX export; any
+    failure returns an empty dict.
+    """
+    query = " ".join((title or "").split())[:240]
+    if len(query) < 4:
+        return {}
+    try:
+        response = requests.get(
+            "https://api.semanticscholar.org/graph/v1/paper/search",
+            params={
+                "query": query,
+                "limit": 1,
+                "fields": "title,year,authors,venue,externalIds",
+            },
+            timeout=8,
+            headers={"User-Agent": "PaperReader/2.1 metadata"},
+        )
+        response.raise_for_status()
+        papers = response.json().get("data") or []
+    except Exception as exc:
+        logger.info("Paper metadata lookup unavailable: %s", exc)
+        return {}
+    if not papers:
+        return {}
+    paper = papers[0]
+    metadata = {
+        "title": str(paper.get("title") or "").strip(),
+        "year": str(paper.get("year") or ""),
+        "venue": str(paper.get("venue") or "").strip(),
+        "authors": ", ".join(
+            str(author.get("name") or "") for author in (paper.get("authors") or [])[:10]
+        ).strip(", "),
+    }
+    external = paper.get("externalIds") or {}
+    if external.get("DOI"):
+        metadata["doi"] = str(external["DOI"])
+    if external.get("ArXiv"):
+        metadata["eprint"] = str(external["ArXiv"])
+    return {key: value for key, value in metadata.items() if value}
 
 
 def build_grounded_prompt(

@@ -81,6 +81,19 @@ class LatexRecoveryEntry:
 
 
 @dataclass
+class AnnotationEntry:
+    id: str
+    document_id: str
+    owner_user_id: int
+    page: int = 1
+    quote: str = ""
+    color: str = "yellow"
+    note: str = ""
+    position_ratio: float = 0.0
+    created_at: str = ""
+
+
+@dataclass
 class DocumentRecord:
     document_id: str
     owner_user_id: int
@@ -115,6 +128,9 @@ class DocumentRecord:
     failure: FailureEntry | None = None
     retry_count: int = 0
     latex_recovery: LatexRecoveryEntry | None = None
+    last_read_page: int = 0
+    last_read_ratio: float = 0.0
+    metadata: dict = field(default_factory=dict)
     deleted_at: datetime | None = None
 
 
@@ -213,6 +229,9 @@ def _document_from_row(row) -> DocumentRecord:
             if isinstance(recovery_payload, dict)
             else None
         ),
+        last_read_page=int(row["last_read_page"] or 0),
+        last_read_ratio=float(row["last_read_ratio"] or 0.0),
+        metadata=json.loads(row["metadata_json"] or "{}") if row["metadata_json"] else {},
         deleted_at=_from_iso(row["deleted_at"]) if row["deleted_at"] else None,
     )
 
@@ -424,6 +443,87 @@ def list_documents_for_user(owner_user_id: int) -> list[DocumentRecord]:
 def touch_document_opened(record: DocumentRecord) -> DocumentRecord:
     record.last_opened_at = _utcnow()
     return save_document(record)
+
+
+def update_reading_progress(document_id: str, page: int, ratio: float) -> None:
+    """Persist reading position without bumping updated_at (history order)."""
+    with db_cursor() as conn:
+        conn.execute(
+            "UPDATE documents SET last_read_page = ?, last_read_ratio = ? WHERE document_id = ?",
+            (max(0, int(page)), max(0.0, min(1.0, float(ratio))), document_id),
+        )
+    record = DOCUMENTS.get(document_id)
+    if record:
+        record.last_read_page = max(0, int(page))
+        record.last_read_ratio = max(0.0, min(1.0, float(ratio)))
+
+
+def set_document_metadata(document_id: str, metadata: dict) -> None:
+    with db_cursor() as conn:
+        conn.execute(
+            "UPDATE documents SET metadata_json = ? WHERE document_id = ?",
+            (json.dumps(metadata, ensure_ascii=False), document_id),
+        )
+    record = DOCUMENTS.get(document_id)
+    if record:
+        record.metadata = metadata
+
+
+def create_annotation(entry: AnnotationEntry) -> AnnotationEntry:
+    with db_cursor() as conn:
+        conn.execute(
+            """
+            INSERT INTO annotations (id, document_id, owner_user_id, page, quote, color, note, position_ratio, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entry.id,
+                entry.document_id,
+                entry.owner_user_id,
+                entry.page,
+                entry.quote,
+                entry.color,
+                entry.note,
+                entry.position_ratio,
+                entry.created_at,
+            ),
+        )
+    return entry
+
+
+def list_annotations_for_document(document_id: str, owner_user_id: int) -> list[AnnotationEntry]:
+    with db_cursor() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM annotations
+            WHERE document_id = ? AND owner_user_id = ?
+            ORDER BY created_at ASC
+            """,
+            (document_id, owner_user_id),
+        ).fetchall()
+    return [
+        AnnotationEntry(
+            id=row["id"],
+            document_id=row["document_id"],
+            owner_user_id=int(row["owner_user_id"]),
+            page=int(row["page"] or 1),
+            quote=row["quote"] or "",
+            color=row["color"] or "yellow",
+            note=row["note"] or "",
+            position_ratio=float(row["position_ratio"] or 0.0),
+            created_at=row["created_at"] or "",
+        )
+        for row in rows
+    ]
+
+
+def delete_annotation(annotation_id: str, document_id: str, owner_user_id: int) -> bool:
+    with db_cursor() as conn:
+        deleted = conn.execute(
+            "DELETE FROM annotations WHERE id = ? AND document_id = ? AND owner_user_id = ?",
+            (annotation_id, document_id, owner_user_id),
+        ).rowcount
+    return deleted == 1
 
 
 def require_document_owner(document_id: str, owner_user_id: int) -> DocumentRecord:

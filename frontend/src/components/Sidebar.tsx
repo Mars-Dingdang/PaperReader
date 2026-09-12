@@ -11,14 +11,15 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Search,
   Settings,
   Sparkles,
   Star,
   Sun,
   Trash2,
 } from 'lucide-react'
-import type { ArtifactItem, AuthUser, DocumentSummary } from '../lib/api'
-import { makeDataUrl } from '../lib/api'
+import type { ArtifactItem, AuthUser, DocumentSummary, LibrarySearchHit } from '../lib/api'
+import { getDocumentBibtex, makeDataUrl, searchLibrary } from '../lib/api'
 import { ArtifactPreviewTip } from './ArtifactPreviewTip'
 
 type Tab = 'tasks' | 'favorites'
@@ -53,6 +54,7 @@ type Props = {
   onRefreshStatus: () => void
   onOpenLiteratureChat: () => void
   literatureChatOpen: boolean
+  onSearchLocate: (hit: LibrarySearchHit) => void
 }
 
 function formatSize(bytes: number): string {
@@ -102,6 +104,7 @@ export function Sidebar({
   onRefreshStatus,
   onOpenLiteratureChat,
   literatureChatOpen,
+  onSearchLocate,
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [tab, setTab] = useState<Tab>('tasks')
@@ -110,6 +113,42 @@ export function Sidebar({
   const [hoverPreview, setHoverPreview] = useState<{ artifact: ArtifactItem; rect: DOMRect } | null>(null)
   const [contextMenu, setContextMenu] = useState<{ documentId: string; x: number; y: number } | null>(null)
   const hoverTimerRef = useRef<number | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchHits, setSearchHits] = useState<LibrarySearchHit[]>([])
+  const [searching, setSearching] = useState(false)
+
+  // Full-text library search with a light debounce; empty query clears.
+  useEffect(() => {
+    const query = searchQuery.trim()
+    if (!query) {
+      setSearchHits([])
+      setSearching(false)
+      return
+    }
+    setSearching(true)
+    const timer = window.setTimeout(() => {
+      void searchLibrary(query)
+        .then((hits) => setSearchHits(hits))
+        .catch(() => setSearchHits([]))
+        .finally(() => setSearching(false))
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [searchQuery])
+
+  async function exportBibtex(documentId: string) {
+    try {
+      const { bibtex, filename } = await getDocumentBibtex(documentId)
+      const blob = new Blob([bibtex], { type: 'text/plain;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      link.click()
+      URL.revokeObjectURL(url)
+    } catch (e: any) {
+      alert(`导出 BibTeX 失败：${e?.message ?? String(e)}`)
+    }
+  }
 
   useEffect(() => () => {
     if (hoverTimerRef.current) window.clearTimeout(hoverTimerRef.current)
@@ -228,9 +267,51 @@ export function Sidebar({
         </button>
       </nav>
 
+      <div className="library-search">
+        <Search size={14} />
+        <input
+          type="text"
+          placeholder="全文搜索文献库…"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+        />
+        {searchQuery && (
+          <button className="icon-btn" title="清除搜索" onClick={() => setSearchQuery('')}>
+            <Trash2 size={12} />
+          </button>
+        )}
+      </div>
+
       <div className="sidebar-scroll">
         <div className="sidebar-divider" />
 
+        {searchQuery.trim() ? (
+          <div className="doc-list">
+            {searching ? (
+              <div className="muted small" style={{ padding: 12 }}>搜索中…</div>
+            ) : searchHits.length === 0 ? (
+              <div className="muted small" style={{ padding: 12 }}>没有匹配的文本</div>
+            ) : (
+              searchHits.map((hit) => (
+                <button
+                  key={`${hit.document_id}-${hit.side}`}
+                  className={`doc-item search-hit ${hit.document_id === activeDocumentId ? 'active' : ''}`}
+                  onClick={() => onSearchLocate(hit)}
+                  title={hit.snippet}
+                >
+                  <div className="doc-icon"><FileText size={18} /></div>
+                  <div className="doc-meta">
+                    <div className="doc-name">{hit.document_title}</div>
+                    <div className="doc-sub">
+                      <span className="muted small">{hit.side === 'original' ? '原文' : '译文'}</span>
+                    </div>
+                    <div className="muted tiny">{hit.snippet.slice(0, 60)}…</div>
+                  </div>
+                </button>
+              ))
+            )}
+          </div>
+        ) : (
         <div className="doc-list">
         {visible.length === 0 ? (
           <div className="muted small" style={{ padding: '12px' }}>
@@ -240,6 +321,7 @@ export function Sidebar({
           visible.map((doc) => {
             const active = doc.document_id === activeDocumentId
             const fav = favorites.includes(doc.document_id)
+            const displayName = doc.title || doc.source_filename || doc.document_id
             return (
               <div
                 key={doc.document_id}
@@ -255,9 +337,9 @@ export function Sidebar({
                   <FileText size={20} />
                 </div>
                 <div className="doc-meta">
-                  <div className="doc-name">{doc.source_filename || doc.document_id}</div>
+                  <div className="doc-name" title={doc.source_filename}>{displayName}</div>
                   <div className="doc-sub">
-                    <span>{formatSize(doc.size_bytes)}</span>
+                    <span>{doc.year || formatSize(doc.size_bytes)}</span>
                     <StatusBadge status={doc.status} />
                   </div>
                   <div className="muted tiny">{formatTime(doc.last_opened_at || doc.updated_at || doc.created_at)}</div>
@@ -288,6 +370,7 @@ export function Sidebar({
           })
         )}
       </div>
+        )}
 
       {activeDocumentId && (
         <>
@@ -455,6 +538,17 @@ export function Sidebar({
             >
               <Pencil size={14} />
               更改文档名
+            </button>
+            <button
+              className="context-menu-item"
+              onClick={() => {
+                const id = contextMenu.documentId
+                setContextMenu(null)
+                void exportBibtex(id)
+              }}
+            >
+              <FileText size={14} />
+              导出 BibTeX
             </button>
             <button
               className="context-menu-item danger"

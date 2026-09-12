@@ -1,3 +1,5 @@
+import type { OutlineItem } from './pdfOutline'
+
 export type UploadResult = { document_id: string; status: string }
 
 export type ArtifactItem = {
@@ -74,6 +76,8 @@ export type DocumentStatus = {
   last_compile_warning?: string | null
   failure?: FailureItem | null
   latex_recovery?: LatexRecoveryItem | null
+  last_read_page: number
+  last_read_ratio: number
 }
 
 export type DocumentSummary = {
@@ -86,6 +90,46 @@ export type DocumentSummary = {
   updated_at?: string | null
   last_opened_at?: string | null
   has_translated_pdf: boolean
+  title: string
+  year: string
+}
+
+export type AnnotationItem = {
+  id: string
+  page: number
+  quote: string
+  color: string
+  note: string
+  position_ratio: number
+  created_at: string
+}
+
+export type FigureItem = {
+  kind: string
+  caption: string
+  page: number | null
+  url: string
+}
+
+export type DocumentStructure = {
+  outline: OutlineItem[]
+  figures: FigureItem[]
+}
+
+export type LibrarySearchHit = {
+  document_id: string
+  document_title: string
+  side: 'original' | 'translated'
+  snippet: string
+  position_ratio: number
+}
+
+export type SourceRefItem = {
+  label: string
+  title: string
+  content: string
+  document_id?: string | null
+  position_ratio?: number | null
 }
 
 export type UserSettings = {
@@ -390,6 +434,76 @@ export async function listChatSessions(
   return apiFetch(`/api/chat/sessions?${params.toString()}`)
 }
 
+// Streaming chat (SSE).  Events: meta {session_id}, delta {text},
+// done {answer, session_id}, error {message}.  Returns the final answer.
+export async function streamChat(
+  payload: Parameters<typeof sendChat>[0],
+  handlers: { onMeta?: (sessionId: string) => void; onDelta?: (text: string) => void }
+): Promise<{ answer: string; session_id: string; sources: SourceRefItem[] }> {
+  const res = await fetch(`${BACKEND}/api/chat/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload)
+  })
+  if (!res.ok || !res.body) {
+    const text = await res.text()
+    let message = text || res.statusText
+    try {
+      const detail = JSON.parse(text)?.detail
+      if (typeof detail === 'string') message = detail
+    } catch {
+      // Plain-text errors are already useful.
+    }
+    throw new ApiError(message)
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let answer = ''
+  let sessionId = ''
+  let sources: SourceRefItem[] = []
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let boundary = buffer.indexOf('\n\n')
+    while (boundary >= 0) {
+      const chunk = buffer.slice(0, boundary)
+      buffer = buffer.slice(boundary + 2)
+      boundary = buffer.indexOf('\n\n')
+      let eventName = 'message'
+      const dataLines: string[] = []
+      for (const line of chunk.split('\n')) {
+        if (line.startsWith('event:')) eventName = line.slice(6).trim()
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+      }
+      if (!dataLines.length) continue
+      let payloadData: any
+      try {
+        payloadData = JSON.parse(dataLines.join('\n'))
+      } catch {
+        continue
+      }
+      if (eventName === 'meta') {
+        sessionId = payloadData.session_id || sessionId
+        handlers.onMeta?.(sessionId)
+      } else if (eventName === 'delta') {
+        const text = payloadData.text || ''
+        answer += text
+        handlers.onDelta?.(text)
+      } else if (eventName === 'done') {
+        answer = payloadData.answer || answer
+        sessionId = payloadData.session_id || sessionId
+        sources = Array.isArray(payloadData.sources) ? payloadData.sources : sources
+      } else if (eventName === 'error') {
+        throw new ApiError(payloadData.message || '聊天请求失败')
+      }
+    }
+  }
+  return { answer, session_id: sessionId, sources }
+}
+
 export async function createChatSession(payload: {
   scope: 'document' | 'library'
   document_ids: string[]
@@ -412,7 +526,7 @@ export async function locateCounterpart(payload: {
   selected_text: string
   source_page?: number
   source_page_count?: number
-}): Promise<{ target_text: string; position_ratio: number; confidence: number; alignment_method: string }> {
+}): Promise<{ target_text: string; position_ratio: number; confidence: number; alignment_method: string; highlight_text: string }> {
   return apiFetch(`/api/document/${payload.documentId}/locate-counterpart`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -423,6 +537,61 @@ export async function locateCounterpart(payload: {
       source_page_count: payload.source_page_count
     })
   })
+}
+
+export async function listAnnotations(documentId: string): Promise<AnnotationItem[]> {
+  return apiFetch(`/api/document/${documentId}/annotations`)
+}
+
+export async function createAnnotation(
+  documentId: string,
+  payload: { page: number; quote: string; color: string; note: string; position_ratio: number }
+): Promise<AnnotationItem> {
+  return apiFetch(`/api/document/${documentId}/annotations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+}
+
+export async function deleteAnnotation(documentId: string, annotationId: string): Promise<void> {
+  await apiFetch(`/api/document/${documentId}/annotations/${annotationId}`, { method: 'DELETE' })
+}
+
+export async function updateReadingProgress(
+  documentId: string,
+  page: number,
+  ratio: number
+): Promise<void> {
+  await apiFetch(`/api/document/${documentId}/progress`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ page, ratio })
+  })
+}
+
+export async function downloadNotes(documentId: string): Promise<void> {
+  const res = await apiFetch(`/api/document/${documentId}/notes.md`, {}, false)
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'reading-notes.md'
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+export async function getDocumentStructure(documentId: string): Promise<DocumentStructure> {
+  return apiFetch(`/api/document/${documentId}/structure`)
+}
+
+export async function searchLibrary(query: string): Promise<LibrarySearchHit[]> {
+  const params = new URLSearchParams({ q: query })
+  return apiFetch(`/api/search?${params.toString()}`)
+}
+
+export async function getDocumentBibtex(documentId: string): Promise<{ bibtex: string; filename: string }> {
+  return apiFetch(`/api/document/${documentId}/bibtex`)
 }
 
 export function translatedPdfName(sourceFilename: string): string {

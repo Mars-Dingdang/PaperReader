@@ -120,6 +120,74 @@ class OpenAICompatClient:
 
         return ""
 
+    def chat_stream(
+        self,
+        message: str,
+        system_prompt: str,
+        override_api_key: str | None = None,
+        override_base_url: str | None = None,
+        override_model: str | None = None,
+    ):
+        """Yield text deltas from a streaming completion.
+
+        Connection-level retryable errors are retried before the stream
+        starts; once tokens are flowing, errors propagate to the caller.
+        """
+        api_key = override_api_key or settings.openai_api_key
+        base_url = override_base_url or settings.openai_base_url
+        model = override_model or settings.openai_model
+        if not api_key:
+            raise RuntimeError(
+                "No API key configured. Set OPENAI_API_KEY or provide override_api_key."
+            )
+
+        client = self._default_client
+        if override_api_key or override_base_url:
+            client = OpenAI(api_key=api_key, base_url=base_url)
+
+        max_retries = settings.translate_max_retries
+        stream = None
+        for attempt in range(max_retries + 1):
+            try:
+                _global_rate_limiter.acquire()
+                stream = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": message},
+                    ],
+                    temperature=0.2,
+                    stream=True,
+                )
+                break
+            except Exception as exc:
+                is_last_attempt = attempt >= max_retries
+                if is_last_attempt or not _is_retryable_error(exc):
+                    raise
+                retry_after = _retry_after_seconds(exc)
+                delay_seconds = (
+                    retry_after
+                    if retry_after is not None
+                    else 1.5 * (2**attempt) + random.uniform(0, 0.5)
+                )
+                logger.warning(
+                    "LLM stream retryable error (attempt %d/%d), sleeping %.2fs: %s",
+                    attempt + 1,
+                    max_retries + 1,
+                    delay_seconds,
+                    exc,
+                )
+                time.sleep(delay_seconds)
+        if stream is None:
+            return
+        for chunk in stream:
+            if not getattr(chunk, "choices", None):
+                continue
+            delta = getattr(chunk.choices[0], "delta", None)
+            text = getattr(delta, "content", None) if delta is not None else None
+            if text:
+                yield text
+
 
 def _retry_after_seconds(exc: Exception) -> float | None:
     response = getattr(exc, "response", None)

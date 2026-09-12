@@ -726,6 +726,7 @@ textarea { resize: vertical; }
   display: flex;
   overflow: hidden;
   background: var(--bg);
+  position: relative;
 }
 .pdf-outline {
   width: 220px;
@@ -831,6 +832,185 @@ textarea { resize: vertical; }
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+/* ============ In-document search ============ */
+.pdf-search-bar {
+  position: absolute;
+  top: 10px;
+  right: 16px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-sm);
+  padding: 6px 8px;
+}
+.pdf-search-input {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+  width: 180px;
+  background: var(--bg);
+  color: var(--text);
+}
+.pdf-search-count { min-width: 48px; text-align: center; }
+.react-pdf__Page__textContent .pdf-search-highlight {
+  background: rgba(255, 213, 79, 0.55) !important;
+  color: transparent !important;
+  border-radius: 2px;
+}
+.react-pdf__Page__textContent .pdf-search-current {
+  background: rgba(255, 145, 0, 0.85) !important;
+  color: transparent !important;
+  outline: 1px solid rgba(180, 90, 0, 0.6);
+}
+
+/* ============ Persistent annotations ============ */
+.react-pdf__Page__textContent .pdf-annotation-highlight {
+  border-radius: 2px;
+  color: transparent !important;
+}
+.react-pdf__Page__textContent .pdf-annotation-yellow { background: rgba(255, 222, 89, 0.65) !important; }
+.react-pdf__Page__textContent .pdf-annotation-green { background: rgba(129, 199, 132, 0.6) !important; }
+.react-pdf__Page__textContent .pdf-annotation-blue { background: rgba(144, 202, 249, 0.6) !important; }
+.react-pdf__Page__textContent .pdf-annotation-pink { background: rgba(244, 143, 177, 0.6) !important; }
+.menu-annotation {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+}
+.menu-annotation-colors {
+  display: flex;
+  gap: 8px;
+}
+.menu-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  padding: 0;
+}
+.menu-swatch:hover { transform: scale(1.12); }
+.swatch-yellow { background: rgba(255, 222, 89, 0.9); }
+.swatch-green { background: rgba(129, 199, 132, 0.85); }
+.swatch-blue { background: rgba(144, 202, 249, 0.85); }
+.swatch-pink { background: rgba(244, 143, 177, 0.85); }
+.menu-annotation-note {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* ============ Virtualized page placeholder & figure strip ============ */
+.pdf-page-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 20px;
+}
+.pdf-figure-strip {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+.pdf-figure-card {
+  flex: 0 0 auto;
+  width: 150px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  cursor: pointer;
+  padding: 6px;
+  text-align: left;
+}
+.pdf-figure-card:hover { border-color: var(--accent); }
+.pdf-figure-card img {
+  width: 100%;
+  height: 90px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: #fff;
+}
+.pdf-figure-caption {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* ============ Chat citations ============ */
+.citation-badge {
+  display: inline-block;
+  margin: 0 2px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 18px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  cursor: default;
+  vertical-align: 2px;
+}
+.citation-badge.jumpable {
+  cursor: pointer;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.citation-badge.jumpable:hover { background: var(--accent-soft); }
+
+/* ============ Sidebar library search ============ */
+.library-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 12px 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--muted);
+}
+.library-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 13px;
+  color: var(--text);
+}
+.doc-item.search-hit {
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
 }
 
 /* ============ Chat ============ */
