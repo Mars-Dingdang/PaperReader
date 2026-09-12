@@ -90,13 +90,8 @@ def test_translate_latex_document_preserves_original_preamble(monkeypatch) -> No
 \\end{document}
 """
 
-    def fake_chat(**kwargs) -> str:
-        return """\\begin{spacing}{1.1}
-\\begin{homeworkProblem}
-\\Answer 你好，世界。
-\\end{homeworkProblem}
-\\end{spacing}
-"""
+    def fake_chat(message, system_prompt, **kwargs) -> str:
+        return "[译]" + message.replace("Hello world.", "你好，世界。")
 
     monkeypatch.setattr(translate_service.llm_client, "chat", fake_chat)
 
@@ -107,6 +102,12 @@ def test_translate_latex_document_preserves_original_preamble(monkeypatch) -> No
     assert translated.count("\\begin{document}") == 1
     assert translated.count("\\end{document}") == 1
     assert "你好，世界。" in translated
+    # Environment commands ride through as protected placeholders and must
+    # come back verbatim.
+    assert translated.count("\\begin{spacing}{1.1}") == 1
+    assert translated.count("\\end{spacing}") == 1
+    assert translated.count("\\begin{homeworkProblem}") == 1
+    assert translated.count("\\end{homeworkProblem}") == 1
 
 
 def test_translate_latex_document_shims_arxiv_unicode_declaration_for_xelatex(
@@ -194,3 +195,23 @@ def test_ensure_cjk_support_skips_documents_that_already_declare_cjk() -> None:
     )
 
     assert translate_service._ensure_cjk_support(prefix) == prefix
+
+
+def test_ensure_cjk_support_ignores_commented_cjk_packages() -> None:
+    # aaai2027.sty's template lists forbidden packages in comments; that must
+    # not count as existing CJK support or Chinese renders in the Latin text
+    # font and disappears from the PDF.
+    prefix = (
+        r"\documentclass{article}"
+        "\n"
+        r"% \usepackage{CJK} -- This package is specifically forbidden"
+        "\n"
+        r"\begin{document}"
+    )
+
+    supported = translate_service._ensure_cjk_support(prefix)
+
+    assert r"\usepackage{xeCJK}" in supported
+    assert supported.rindex(r"\usepackage{xeCJK}") < supported.rindex(
+        r"\begin{document}"
+    )

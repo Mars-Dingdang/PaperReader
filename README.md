@@ -1,12 +1,12 @@
-# PaperReader v2.1.7
+# PaperReader v2.1.8
 
 English | [简体中文](docs/zh-cn/README.zh-cn.md)
 
-[Download Windows / macOS v2.1.7](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.7) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.7.md)
+[Download Windows / macOS v2.1.8](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.8) · [Upgrade guide](docs/UPGRADING.md) · [Release notes](docs/releases/v2.1.8.md)
 
 > 📖 **Please read the [User Guide (中文)](docs/user_instruction.md) before downloading.** It covers installation (including the Windows "unblock ZIP" step that prevents most launch failures), first-run provider setup, paper submission, history, artifacts, and AI chat.
 
-v2.1.7 fixes translated-PDF compilation in the macOS desktop app: TeX engine discovery via an absolute `LATEXMK_PATH`, portable CJK font selection, and warning handling for strict builds. See the [release notes](docs/releases/v2.1.7.md) for details. Frontend/API package version: `2.1.7`.
+v2.1.8 aligns the LaTeX pipeline with the PDF pipeline — multi-file TeX projects are flattened before translation, translation reports per-chunk progress, and a failed run resumes from its chunk checkpoint instead of starting over. See the [release notes](docs/releases/v2.1.8.md) for details. Frontend/API package version: `2.1.8`.
 
 ![](./images/demo1.png)
 

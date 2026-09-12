@@ -431,6 +431,75 @@ def compile_tex_project(tex_path: Path, output_dir: Path, *, compiler: str | Non
     return compile_tex_project_with_fallback(tex_path, output_dir, compiler=compiler).pdf_path
 
 
+_INPUT_COMMAND_PATTERN = re.compile(r"\\(?:input|include)\s*\{([^}]+)\}")
+_COMMENT_START_PATTERN = re.compile(r"(?<!\\)%")
+_MAX_FLATTEN_DEPTH = 8
+_TITLE_COMMAND_PATTERN = re.compile(r"\\title\s*(?:\[[^\]]*\])?\s*\{")
+
+
+def extract_tex_title(text: str) -> str | None:
+    """Return the ``\\title{...}`` argument with balanced braces, if any."""
+    match = _TITLE_COMMAND_PATTERN.search(text)
+    if not match:
+        return None
+    depth = 1
+    chars: list[str] = []
+    for ch in text[match.end() :]:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        chars.append(ch)
+    title = "".join(chars).strip()
+    return title or None
+
+
+def _is_commented(text: str, position: int) -> bool:
+    line_start = text.rfind("\n", 0, position) + 1
+    return _COMMENT_START_PATTERN.search(text, line_start, position) is not None
+
+
+def _resolve_tex_file(base_dir: Path, target: str) -> Path | None:
+    candidate = base_dir / target
+    if candidate.suffix.lower() != ".tex":
+        candidate = candidate.with_name(candidate.name + ".tex")
+    return candidate if candidate.is_file() else None
+
+
+def flatten_tex_project(main_tex: Path, *, _depth: int = 0, _stack: frozenset[Path] = frozenset()) -> str:
+    """Return the main TeX file with ``\input``/``\include`` files inlined.
+
+    Multi-file arXiv sources keep their prose in included files, so a document
+    record built from the main file alone would translate (almost) nothing.
+    Included files resolve relative to the including file's directory. Files
+    that cannot be read and commented-out commands are left untouched, keeping
+    compilation behavior unchanged. Depth and cycle guards bound pathological
+    layouts.
+    """
+    if _depth > _MAX_FLATTEN_DEPTH:
+        return ""
+    resolved = main_tex.resolve()
+    try:
+        text = resolved.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+    base_dir = resolved.parent
+    stack = _stack | {resolved}
+
+    def repl(match: re.Match[str]) -> str:
+        if _is_commented(text, match.start()):
+            return match.group(0)
+        target = _resolve_tex_file(base_dir, match.group(1).strip())
+        if target is None or target in stack:
+            return match.group(0)
+        included = flatten_tex_project(target, _depth=_depth + 1, _stack=stack)
+        return included if included else match.group(0)
+
+    return _INPUT_COMMAND_PATTERN.sub(repl, text)
+
+
 _LATEX_TEXT_ESCAPES = (
     ("\\", "\\textbackslash{}"),
     ("&", "\\&"),

@@ -297,6 +297,11 @@ _VERBATIM_ENVIRONMENTS = {"verbatim", "verbatim*", "lstlisting", "minted"}
 _VERBATIM_BEGIN_RE = re.compile(
     r"\\begin\{(" + "|".join(re.escape(name) for name in _VERBATIM_ENVIRONMENTS) + r")\}"
 )
+_VERBATIM_ENV_PATTERN = re.compile(
+    r"\\begin\{(?:verbatim|lstlisting|minted)\*?\}.*?\\end\{(?:verbatim|lstlisting|minted)\*?\}",
+    re.DOTALL,
+)
+_SENTINEL_PATTERN = re.compile("\x00(\\d+)\x00")
 
 
 def _mask_inline_verbatim_and_comment(line: str) -> str:
@@ -447,9 +452,9 @@ def validate_math_structure(text: str) -> list[tuple[int, str]]:
 
 
 _ALIGNMENT_ENVIRONMENTS = {
-    "align", "align*", "aligned", "alignat", "alignat*", "array",
-    "tabular", "tabular*", "matrix", "pmatrix", "bmatrix", "vmatrix",
-    "Vmatrix", "smallmatrix", "cases", "eqnarray", "eqnarray*",
+    "align", "align*", "aligned", "alignat", "alignat*", "alignedat",
+    "array", "tabular", "tabular*", "matrix", "pmatrix", "bmatrix",
+    "vmatrix", "smallmatrix", "cases", "eqnarray", "eqnarray*",
 }
 _ENV_TOKEN_RE = re.compile(r"\\(begin|end)\{([^{}]+)\}")
 
@@ -528,6 +533,150 @@ def validate_latex_structure(text: str) -> list[tuple[int, str]]:
     return sorted(set(issues), key=lambda issue: (issue[0], issue[1]))
 
 
+def repair_prose_underscores(text: str) -> tuple[str, list[str]]:
+    """Escape bare ``_`` characters in prose regions.
+
+    Text-mode ``_`` is always a LaTeX error ("Missing $ inserted"). Sources
+    write ``user\\_instruction``; models sometimes re-emit it as
+    ``user_instruction``. Underscores inside math regions, verbatim bodies,
+    and a command's own brace argument (``\\begin{my_env}``) are left alone.
+    """
+    if "_" not in text:
+        return text, []
+
+    protected: list[str] = []
+
+    def _blank(match: re.Match[str]) -> str:
+        protected.append(match.group(0))
+        return f"\x00{len(protected) - 1}\x00"
+
+    work = _VERBATIM_ENV_PATTERN.sub(_blank, text)
+    span_at = {
+        m.start(): (m.start(), m.end()) for m in _MATH_REGION_RE.finditer(work)
+    }
+
+    out: list[str] = []
+    repairs: list[str] = []
+    line = 1
+    i = 0
+    length = len(work)
+    while i < length:
+        if i in span_at:
+            a, b = span_at[i]
+            out.append(work[a:b])
+            line += work.count("\n", a, b)
+            i = b
+            continue
+        ch = work[i]
+        if ch == "\n":
+            line += 1
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and not _is_escaped_at(work, i):
+            out.append(ch)
+            i += 1
+            if i < length and work[i].isalpha():
+                while i < length and work[i].isalpha():
+                    out.append(work[i])
+                    i += 1
+                # A brace group immediately after the command is its argument;
+                # underscores there (e.g. \begin{my_env}) are literal.
+                j = i
+                while j < length and work[j] in " \t":
+                    j += 1
+                if j < length and work[j] == "{":
+                    depth = 0
+                    while j < length:
+                        if work[j] == "{" and not _is_escaped_at(work, j):
+                            depth += 1
+                        elif work[j] == "}" and not _is_escaped_at(work, j):
+                            depth -= 1
+                            if depth == 0:
+                                break
+                        j += 1
+                    out.append(work[i : j + 1])
+                    i = j + 1
+            elif i < length:
+                out.append(work[i])
+                i += 1
+            continue
+        if ch == "_" and not _is_escaped_at(work, i):
+            out.append(r"\_")
+            repairs.append(f"L{line}: escaped '_' that translation left bare")
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+
+    text = "".join(out)
+    return _SENTINEL_PATTERN.sub(lambda m: protected[int(m.group(1))], text), repairs
+
+
+_LINEBREAK_OPTARG_PATTERN = re.compile(
+    r"(\\\\)([ \t]*\n?[ \t]*)(\[(?![ \t]*[+-]?[.\d]))"
+)
+
+
+def repair_linebreak_optional_args(text: str) -> tuple[str, list[str]]:
+    """Insert ``{}`` between ``\\\\`` and a following bracketed word.
+
+    After a reflow, a line that begins ``[...]`` directly follows ``\\\\``;
+    TeX then parses the bracket as ``\\\\``'s optional spacing argument and
+    dies with "Missing number" or "Illegal unit of measure". Real spacing
+    arguments start with a number and are left alone.
+    """
+    repairs: list[str] = []
+
+    def repl(match: re.Match[str]) -> str:
+        repairs.append(
+            f"L{_line_of(text, match.start())}: broke \\\\['s optional-argument scan with {{}}"
+        )
+        return match.group(1) + "{}" + match.group(2) + match.group(3)
+
+    text = _LINEBREAK_OPTARG_PATTERN.sub(repl, text)
+    return text, repairs
+
+
+def repair_stray_closing_braces(text: str) -> tuple[str, list[str]]:
+    """Delete ``}`` characters that close a group nothing opened.
+
+    Models occasionally emit a duplicated closing brace after commands such as
+    ``\\url{...}`` (observed as ``\\url{https://...}.}``). A closing brace
+    that arrives with an empty brace stack is always invalid LaTeX, so
+    removing it is compile-safe; every balanced brace is left untouched.
+    Comments and verbatim content are ignored while tracking balance.
+    """
+    if "}" not in text:
+        return text, []
+    repairs: list[str] = []
+    out_lines: list[str] = []
+    depth = 0
+    for line_no, (raw, mask) in enumerate(
+        zip(text.split("\n"), _masked_tex_lines(text)), start=1
+    ):
+        stray: list[int] = []
+        for index, ch in enumerate(mask):
+            if ch == "{" and not _is_escaped_at(mask, index):
+                depth += 1
+            elif ch == "}" and not _is_escaped_at(mask, index):
+                if depth > 0:
+                    depth -= 1
+                else:
+                    stray.append(index)
+        if stray:
+            chars = list(raw)
+            for index in stray:
+                chars[index] = ""
+            out_lines.append("".join(chars))
+            repairs.append(
+                f"L{line_no}: removed {len(stray)} closing brace(s) with no matching opener"
+            )
+        else:
+            out_lines.append(raw)
+    return "\n".join(out_lines), repairs
+
+
 def sanitize_and_repair(text: str) -> tuple[str, list[str]]:
     """Combined pipeline hook: sanitize prose characters, then repair known
     OCR math faults. Returns the new text and repair notes (empty when
@@ -562,7 +711,19 @@ def sanitize_and_repair(text: str) -> tuple[str, list[str]]:
     if parts is None:
         sanitized = sanitize_latex_body(text)
         repaired, repairs = repair_common_math_faults(sanitized)
-        return repaired, replacement_repairs + control_repairs + repairs
+        repaired, brace_repairs = repair_stray_closing_braces(repaired)
+        repaired, underscore_repairs = repair_prose_underscores(repaired)
+        repaired, cr_repairs = repair_linebreak_optional_args(repaired)
+        return (
+            repaired,
+            replacement_repairs + control_repairs + repairs + brace_repairs + underscore_repairs + cr_repairs,
+        )
     head, body, tail = parts
     body, repairs = repair_common_math_faults(sanitize_latex_body(body))
-    return head + body + tail, replacement_repairs + control_repairs + repairs
+    body, brace_repairs = repair_stray_closing_braces(body)
+    body, underscore_repairs = repair_prose_underscores(body)
+    body, cr_repairs = repair_linebreak_optional_args(body)
+    return (
+        head + body + tail,
+        replacement_repairs + control_repairs + repairs + brace_repairs + underscore_repairs + cr_repairs,
+    )

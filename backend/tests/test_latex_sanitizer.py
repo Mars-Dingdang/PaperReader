@@ -206,3 +206,77 @@ def test_sanitize_and_repair_leaves_preamble_untouched() -> None:
     # Body prose is still sanitized
     assert "证明完毕$\\square$" in out
     assert repairs == []
+
+
+def test_repair_stray_closing_braces_removes_only_unmatched() -> None:
+    from app.services.latex_sanitizer import repair_stray_closing_braces
+
+    text = (
+        r"论文：\url{https://arxiv.org/abs/2603.27148}.} 代码见仓库。" + "\n"
+        + r"\textbf{加粗 {嵌套} 文本}" + "\n"
+    )
+    repaired, repairs = repair_stray_closing_braces(text)
+
+    assert r"\url{https://arxiv.org/abs/2603.27148}. 代码见仓库。" in repaired
+    assert r"\textbf{加粗 {嵌套} 文本}" in repaired
+    assert len(repairs) == 1
+    assert repairs[0].startswith("L1: removed 1 closing brace")
+
+
+def test_repair_stray_closing_braces_ignores_comments_and_verbatim() -> None:
+    from app.services.latex_sanitizer import repair_stray_closing_braces
+
+    text = (
+        "\\begin{verbatim}\n"
+        "stray } inside verbatim\n"
+        "\\end{verbatim}\n"
+        "prose } % comment with }\n"
+    )
+    repaired, repairs = repair_stray_closing_braces(text)
+
+    assert "stray } inside verbatim" in repaired
+    assert repairs and repairs[0].startswith("L4:")
+
+
+def test_alignment_advisory_accepts_alignedat() -> None:
+    text = (
+        "\\begin{equation}\n"
+        "\\begin{alignedat}{2}\n"
+        "&\\text{左} &&\\quad x = 1 \\\\\n"
+        "&\\text{右} &&\\quad y = 2\n"
+        "\\end{alignedat}\n"
+        "\\end{equation}\n"
+    )
+
+    assert validate_latex_structure(text) == []
+
+
+def test_repair_prose_underscores_escapes_bare_underscore() -> None:
+    from app.services.latex_sanitizer import repair_prose_underscores
+
+    text = (
+        "\\textbf{User instruction:} [user_instruction] follows.\n"
+        "Math $a_1$ stays, and \\begin{my_env}\\end{my_env} survives.\n"
+    )
+    repaired, repairs = repair_prose_underscores(text)
+
+    assert "[user\\_instruction]" in repaired
+    assert "$a_1$" in repaired, "math underscores are untouched"
+    assert "\\begin{my_env}" in repaired, "command arguments are untouched"
+    assert len(repairs) == 1
+
+
+def test_repair_linebreak_optional_args_inserts_group() -> None:
+    from app.services.latex_sanitizer import repair_linebreak_optional_args
+
+    text = "\\textbf{Format} \\\\\n[Scratchpad] follows: $x$\n"
+    repaired, repairs = repair_linebreak_optional_args(text)
+
+    assert "\\{}" in repaired
+    assert "[Scratchpad]" in repaired
+    assert len(repairs) == 1
+
+    spaced = "\\textbf{Format} \\\\[2ex]\nnext\n"
+    kept, repairs2 = repair_linebreak_optional_args(spaced)
+    assert kept == spaced
+    assert repairs2 == []

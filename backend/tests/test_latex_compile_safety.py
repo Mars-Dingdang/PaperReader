@@ -68,7 +68,7 @@ def test_failed_lenient_compile_does_not_accept_partial_pdf(tmp_path, monkeypatc
 
     calls = 0
 
-    def fake_run(tex_path: Path, output_dir: Path, *, force: bool, compiler=None):
+    def fake_run(tex_path: Path, output_dir: Path, *, force: bool, compiler=None, texinputs=None):
         nonlocal calls
         calls += 1
         # Reproduce a TeX engine's troublesome behavior: both passes write a
@@ -135,7 +135,7 @@ def test_stale_fdb_latexmk_is_removed_before_strict_run(tmp_path, monkeypatch):
 
     observed: list[bool] = []
 
-    def fake_run(tex_path: Path, output_dir: Path, *, force: bool, compiler=None):
+    def fake_run(tex_path: Path, output_dir: Path, *, force: bool, compiler=None, texinputs=None):
         observed.append(fdb.exists())
         (output_dir / "paper.pdf").write_bytes(b"%PDF-1.4")
         return CompletedProcess([], 0, stdout="", stderr="")
@@ -154,7 +154,7 @@ def test_strict_failure_fdb_is_cleared_before_lenient_retry(tmp_path, monkeypatc
     output_dir.mkdir()
     fdb = output_dir / "paper.fdb_latexmk"
 
-    def fake_run(tex_path: Path, output_dir: Path, *, force: bool, compiler=None):
+    def fake_run(tex_path: Path, output_dir: Path, *, force: bool, compiler=None, texinputs=None):
         if not force:
             # A failing strict pass leaves its error state in the fdb, which
             # would otherwise make the retry report "Nothing to do".
@@ -173,7 +173,7 @@ def test_error_detail_reports_strict_and_lenient_failures(tmp_path, monkeypatch)
     tex = tmp_path / "paper.tex"
     tex.write_text("broken", encoding="utf-8")
 
-    def fake_run(tex_path: Path, output_dir: Path, *, force: bool, compiler=None):
+    def fake_run(tex_path: Path, output_dir: Path, *, force: bool, compiler=None, texinputs=None):
         stdout = "real TeX error in strict pass" if not force else "lenient pass failure"
         return CompletedProcess([], 11, stdout=stdout, stderr="")
 
@@ -291,7 +291,7 @@ def test_compile_failure_report_prefers_structured_log_digest(tmp_path, monkeypa
     tex = tmp_path / "paper.tex"
     tex.write_text("broken", encoding="utf-8")
 
-    def fake_run(tex_path: Path, output_dir: Path, *, force: bool, compiler=None):
+    def fake_run(tex_path: Path, output_dir: Path, *, force: bool, compiler=None, texinputs=None):
         (output_dir / "paper.log").write_text(_SAMPLE_LOG, encoding="utf-8")
         return CompletedProcess([], 12, stdout="Missing character noise everywhere", stderr="")
 
@@ -312,7 +312,7 @@ def test_compile_success_with_missing_glyphs_sets_warning(tmp_path, monkeypatch)
     log = tmp_path / "paper.log"
     log.write_text(_SAMPLE_LOG, encoding="utf-8")
 
-    def fake_run(tex_path: Path, output_dir: Path, *, force: bool, compiler=None):
+    def fake_run(tex_path: Path, output_dir: Path, *, force: bool, compiler=None, texinputs=None):
         (output_dir / "paper.pdf").write_bytes(b"%PDF-1.4")
         return CompletedProcess([], 0, stdout="", stderr="")
 

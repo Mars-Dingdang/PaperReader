@@ -474,6 +474,43 @@ def collect_translatable_strings(ir: list[Block]) -> list[str]:
     return out
 
 
+_REFERENCE_HEADING_PATTERN = re.compile(r"^\s*(?:references|bibliography)\s*$", re.IGNORECASE)
+
+
+def translatable_mask(ir: list[Block]) -> list[bool]:
+    """Boolean twin of `collect_translatable_strings`: False marks strings that
+    must stay in the source language.
+
+    Bibliography entries stay English so they remain searchable; they also
+    burn a large share of the translation budget. The masked region starts at
+    a References/Bibliography heading (or a typed reference list, which MinerU
+    emits even without the heading) and ends at the next title, so an appendix
+    placed after the bibliography still translates.
+    """
+    mask: list[bool] = []
+    in_references = False
+    for block in ir:
+        if isinstance(block, Title):
+            in_references = _REFERENCE_HEADING_PATTERN.match(block.text.strip()) is not None
+            mask.append(not in_references)
+        elif isinstance(block, Paragraph):
+            for run in block.runs:
+                if isinstance(run, TextRun):
+                    mask.append(not in_references)
+        elif isinstance(block, ListBlock):
+            if block.list_type == "reference_list":
+                in_references = True
+            for item in block.items:
+                for run in item:
+                    if isinstance(run, TextRun):
+                        mask.append(not in_references)
+        elif isinstance(block, Image) and block.caption:
+            mask.append(not in_references)
+        elif isinstance(block, Table) and block.caption:
+            mask.append(not in_references)
+    return mask
+
+
 def apply_translations(ir: list[Block], translations: list[str]) -> None:
     """Write `translations` back into `ir` in the same order produced by
     `collect_translatable_strings`. Lengths must match."""

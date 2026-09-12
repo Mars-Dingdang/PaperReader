@@ -1,49 +1,27 @@
-from app.services.document_pipeline import _clean_nougat_text, _recover_missing_leading_text
+from app.services.document_pipeline import (
+    _clean_nougat_text_with_metadata,
+    _recover_missing_leading_text,
+)
 
 
 def test_clean_nougat_text_no_changes_needed() -> None:
-    text = "## Problem 1\n\nBody"
-    cleaned, repaired_up_to, missing_page_count = _clean_nougat_text(text)
+    text = "Heading\n\nBody"
+    cleaned, missing_page_count, recovered_leading = _clean_nougat_text_with_metadata(text)
     assert cleaned == text
-    assert repaired_up_to == 0
     assert missing_page_count == 0
-
-
-def test_clean_nougat_text_repairs_abstract_problem2_case() -> None:
-    text = "**Abstract**\n\nIntro text\n\n## Problem 2\n\nP2"
-    cleaned, repaired_up_to, missing_page_count = _clean_nougat_text(text)
-    assert cleaned.startswith("## Problem 1")
-    assert "Intro text" in cleaned
-    assert repaired_up_to == 1
-    assert missing_page_count == 0
-
-
-def test_clean_nougat_text_inserts_problem1_stub_when_starting_at_problem2() -> None:
-    text = "## Problem 2\n\nP2"
-    cleaned, repaired_up_to, missing_page_count = _clean_nougat_text(text)
-    assert cleaned.startswith("## Problem 1")
-    assert "[Content not extracted by Nougat]" in cleaned
-    assert "## Problem 2" in cleaned
-    assert repaired_up_to == 1
-    assert missing_page_count == 0
-
-
-def test_clean_nougat_text_inserts_missing_leading_problems_when_starting_at_problem3() -> None:
-    text = "## Problem 3\n\nP3"
-    cleaned, repaired_up_to, missing_page_count = _clean_nougat_text(text)
-    assert "## Problem 1" in cleaned
-    assert "## Problem 2" in cleaned
-    assert cleaned.rstrip().endswith("## Problem 3\n\nP3")
-    assert repaired_up_to == 2
-    assert missing_page_count == 0
+    assert recovered_leading is False
 
 
 def test_clean_nougat_text_counts_and_removes_missing_page_markers() -> None:
-    text = "[MISSING_PAGE_EMPTY:1]\n\n[MISSING_PAGE_EMPTY:2]\n\n## Problem 3\n\nP3"
-    cleaned, repaired_up_to, missing_page_count = _clean_nougat_text(text)
+    text = "[MISSING_PAGE_EMPTY:1]\n\n[MISSING_PAGE_EMPTY:2]\n\n## Section\n\nBody"
+    cleaned, missing_page_count, _ = _clean_nougat_text_with_metadata(text)
     assert "MISSING_PAGE_EMPTY" not in cleaned
     assert missing_page_count == 2
-    assert repaired_up_to == 2
+
+
+def test_clean_nougat_text_collapses_blank_line_runs() -> None:
+    cleaned, _, _ = _clean_nougat_text_with_metadata("A\n\n\n\n\nB")
+    assert cleaned == "A\n\nB"
 
 
 def test_recover_missing_leading_text_prepends_only_missing_prefix() -> None:

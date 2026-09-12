@@ -13,6 +13,8 @@ from app.services.document_pipeline import create_document_record, process_docum
 
 router = APIRouter()
 
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
 
 def _run_pipeline(record_id: str, user_id: int) -> None:
     record = get_document(record_id)
@@ -39,8 +41,9 @@ async def upload(
 
     safe_name = Path(file.filename or "uploaded_file").name
     target_path = settings.upload_dir / f"{uuid.uuid4()}_{safe_name}"
-    content = await file.read()
-    target_path.write_bytes(content)
+    with target_path.open("wb") as sink:
+        while chunk := await file.read(_UPLOAD_CHUNK_BYTES):
+            sink.write(chunk)
 
     source_type = "tex" if suffix == ".tex" else "pdf"
     record = create_document_record(target_path, source_type, owner_user_id=user.id)

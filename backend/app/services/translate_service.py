@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import threading
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, TypeVar
@@ -16,6 +17,7 @@ from app.services.mineru_layout import (
     Block,
     apply_translations,
     collect_translatable_strings,
+    translatable_mask,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,6 +58,7 @@ def _run_concurrent(
 
 
 _PLACEHOLDER_PATTERN = re.compile(r"((?<!\\)\$[^$\n]+?(?<!\\)\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\\(?:cite|ref)\{[^}]+\}|https?://\S+)")
+_LATEX_ENV_PATTERN = re.compile(r"\\(?:begin|end)\s*\{[A-Za-z@]+\*?\}")
 _MAX_CHARS_PER_CHUNK = 4000
 _STRUCTURAL_TAG_PATTERN = re.compile(r"</?[A-Za-z][^>\r\n]*>")
 _PLACEHOLDER_TOKEN_RE = re.compile(r"__PR_PH_\d+__")
@@ -69,10 +72,39 @@ _CJK_PREAMBLE_SNIPPET = (
     "\\usepackage{xeCJK}\n"
     + CJK_FONT_FALLBACK_PREAMBLE
 )
+_CJK_EARLY_SNIPPET = (
+    "% Injected by PaperReader to render Chinese translation. Loaded right\n"
+    "% after \\documentclass because font packages that venue styles pull in\n"
+    "% (newtxtext via aaai2027.sty) break fontspec font-name resolution for\n"
+    "% fonts declared after them under XeLaTeX.\n"
+    "\\usepackage{xeCJK}\n"
+    + CJK_FONT_FALLBACK_PREAMBLE
+)
+_DOCUMENTCLASS_PATTERN = re.compile(r"^[ \t]*\\documentclass[ \t]*", re.MULTILINE)
 _XELATEX_UNICODE_COMPAT_SNIPPET = (
     "% Injected by PaperReader for pdfLaTeX source compatibility under XeLaTeX\n"
     "\\providecommand{\\DeclareUnicodeCharacter}[2]{}\n"
 )
+_XELATEX_ENGINE_SHIM_SNIPPET = (
+    "% Injected by PaperReader: translated builds always compile with XeLaTeX for CJK\n"
+    "% output. Load the engine tests first, then disarm styles that hard-abort on\n"
+    "% non-pdfTeX engines (e.g. aaai2027.sty's \\RequirePDFTeX gate); the style's own\n"
+    "% later \\RequirePackage{iftex} becomes a no-op and cannot re-arm it. Some of\n"
+    "% those styles also call the pdfTeX-only \\pdfinfo primitive unconditionally,\n"
+    "% so give it a content-absorbing no-op too.\n"
+    "\\RequirePackage{iftex}\n"
+    "\\let\\RequirePDFTeX\\relax\n"
+    "\\providecommand{\\pdfinfo}[1]{}\n"
+)
+
+
+def _is_escaped_at(text: str, offset: int) -> bool:
+    slashes = 0
+    offset -= 1
+    while offset >= 0 and text[offset] == "\\":
+        slashes += 1
+        offset -= 1
+    return slashes % 2 == 1
 
 
 def protect_placeholders(text: str) -> tuple[str, dict[str, str]]:
@@ -90,6 +122,11 @@ def protect_placeholders(text: str) -> tuple[str, dict[str, str]]:
         mapping[token] = match.group(0)
         return token
 
+    # LaTeX environment commands go first: models silently drop or rewrite
+    # them (observed: \begin{figure*}/\begin{promptbox} lost mid-document,
+    # which left every later \end mispaired and the document uncompilable).
+    # As placeholder tokens they are validated verbatim like math and cites.
+    text = _LATEX_ENV_PATTERN.sub(repl, text)
     text = _STRUCTURAL_TAG_PATTERN.sub(repl, text)
     return _PLACEHOLDER_PATTERN.sub(repl, text), mapping
 
@@ -169,6 +206,77 @@ def _fail_incomplete_translation(idx: int, _item: T, exc: Exception) -> str:
     raise RuntimeError(f"Translation incomplete: chunk {idx + 1} failed") from exc
 
 
+_GLOSSARY_SAMPLE_CHARS = 6000
+_GLOSSARY_MAX_TERMS = 24
+
+
+def build_translation_context(
+    title: str | None,
+    sample_text: str,
+    override_api_key: str | None = None,
+    override_base_url: str | None = None,
+    override_model: str | None = None,
+) -> str:
+    """Pin the paper title and a shared glossary via one best-effort LLM pass.
+
+    Batches otherwise translate in isolation and can render the same term
+    differently in the abstract and the conclusion. Any failure returns ""
+    — context improves consistency but must never block translation.
+    """
+    try:
+        sample = sample_text[:_GLOSSARY_SAMPLE_CHARS]
+        if not sample.strip():
+            return ""
+        response = llm_client.chat(
+            message=f"Paper title: {title or 'unknown'}\n\n{sample}",
+            system_prompt=(
+                "You extract domain terminology from an academic paper so later "
+                "translation batches stay consistent. Return strict JSON only: "
+                '{"terms": [{"en": "...", "zh": "..."}]}. '
+                f"Include at most {_GLOSSARY_MAX_TERMS} entries: recurring technical "
+                "terms, method or system names, and acronyms, each with its "
+                "established Chinese translation. No commentary."
+            ),
+            override_api_key=override_api_key,
+            override_base_url=override_base_url,
+            override_model=override_model,
+        )
+        start = response.find("{")
+        end = response.rfind("}")
+        if start == -1 or end <= start:
+            return ""
+        data = json.loads(response[start : end + 1])
+        terms = data.get("terms") if isinstance(data, dict) else None
+        lines: list[str] = []
+        if title:
+            lines.append(f'The paper title is "{title}"; render it consistently.')
+        if isinstance(terms, list):
+            pairs = [
+                (str(term["en"]).strip(), str(term["zh"]).strip())
+                for term in terms[:_GLOSSARY_MAX_TERMS]
+                if isinstance(term, dict)
+                and isinstance(term.get("en"), str)
+                and isinstance(term.get("zh"), str)
+                and term["en"].strip()
+                and term["zh"].strip()
+            ]
+            if pairs:
+                lines.append(
+                    "Translate these recurring terms the same way everywhere: "
+                    + "; ".join(f"{en} = {zh}" for en, zh in pairs)
+                )
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.info("Terminology extraction skipped: %s", exc)
+        return ""
+
+
+def _with_context(system_prompt: str, translation_context: str) -> str:
+    if translation_context:
+        return f"{system_prompt}\n\n{translation_context}"
+    return system_prompt
+
+
 def _translate_complete_chunk(
     text: str,
     system_prompt: str,
@@ -177,6 +285,7 @@ def _translate_complete_chunk(
     override_model: str | None,
     *,
     strip_fences: bool,
+    ordered: bool = True,
 ) -> str:
     """Translate one bounded chunk, recursively shrinking on output truncation."""
     try:
@@ -203,13 +312,14 @@ def _translate_complete_chunk(
                 override_base_url,
                 override_model,
                 strip_fences=strip_fences,
+                ordered=ordered,
             )
             for part in smaller
         )
 
-    translated = _normalize_translation(text, translated)
+    translated = _normalize_translation(text, translated, ordered=ordered)
     cleaned = _strip_code_fences(translated) if strip_fences else translated.strip()
-    cleaned = _normalize_translation(text, cleaned)
+    cleaned = _normalize_translation(text, cleaned, ordered=ordered)
     return cleaned
 
 
@@ -221,17 +331,21 @@ def translate_text(
     *,
     checkpoint_path: Path | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
+    translation_context: str = "",
 ) -> str:
     protected_text, mapping = protect_placeholders(text)
     chunks = split_text_into_chunks(protected_text)
-    system_prompt = (
-        "You are a professional academic translator. Translate English academic text into Chinese and output only LaTeX body content. "
-        "Do not include document preamble commands like \\documentclass or \\begin{document}. "
-        "Use LaTeX structure commands for headings and lists, such as \\section{}, \\subsection{}, \\begin{enumerate}...\\end{enumerate}, "
-        "and \\begin{itemize}...\\end{itemize}. Use \\textbf{} or \\textit{} for emphasis when needed. "
-        "Do not output Markdown syntax like #, ##, **, or 1./- list markers. "
-        "Never repeat, translate, or explain these instructions. "
-        "Keep all placeholder tokens like __PR_PH_0000__ unchanged, and do not alter LaTeX commands or citation references represented by placeholders."
+    system_prompt = _with_context(
+        (
+            "You are a professional academic translator. Translate English academic text into Chinese and output only LaTeX body content. "
+            "Do not include document preamble commands like \\documentclass or \\begin{document}. "
+            "Use LaTeX structure commands for headings and lists, such as \\section{}, \\subsection{}, \\begin{enumerate}...\\end{enumerate}, "
+            "and \\begin{itemize}...\\end{itemize}. Use \\textbf{} or \\textit{} for emphasis when needed. "
+            "Do not output Markdown syntax like #, ##, **, or 1./- list markers. "
+            "Never repeat, translate, or explain these instructions. "
+            "Keep all placeholder tokens like __PR_PH_0000__ unchanged, and do not alter LaTeX commands or citation references represented by placeholders."
+        ),
+        translation_context,
     )
 
     checkpoint_entries = _load_translation_checkpoint(checkpoint_path)
@@ -287,6 +401,51 @@ def _strip_code_fences(text: str) -> str:
     return _LATEX_FENCE_PATTERN.sub("", text).strip()
 
 
+_COMMENT_START_PATTERN = re.compile(r"(?<!\\)%")
+_VERBATIM_ENV_PATTERN = re.compile(
+    r"\\begin\{(verbatim|lstlisting|minted)\*?\}.*?\\end\{\1\*?\}",
+    re.DOTALL,
+)
+_SENTINEL_PATTERN = re.compile(r"\x00(\d+)\x00")
+
+
+def strip_latex_comments(text: str) -> str:
+    """Remove ``%``-to-end-of-line comments outside verbatim-like environments.
+
+    Commented-out draft text is invisible in the compiled PDF, but it still
+    gets chunked and sent to the LLM — wasting tokens and, when a draft
+    carries protected placeholders the model chooses not to echo back,
+    failing chunk validation persistently. Escaped ``\\%`` is kept, and
+    verbatim/lstlisting/minted bodies are preserved verbatim: their ``%``
+    characters are content, not comments.
+    """
+    protected: list[str] = []
+
+    def _blank(match: re.Match[str]) -> str:
+        protected.append(match.group(0))
+        return f"\x00{len(protected) - 1}\x00"
+
+    text = _VERBATIM_ENV_PATTERN.sub(_blank, text)
+
+    lines = []
+    for line in text.split("\n"):
+        comment = _COMMENT_START_PATTERN.search(line)
+        if comment is None:
+            lines.append(line)
+            continue
+        # A comment-only line must be dropped entirely: TeX treats it as no
+        # line at all, and replacing it with an empty line would introduce a
+        # \par — fatal inside pgfkeys option blocks, where venue templates
+        # (appendix comments like "% title=...") commonly carry comment-only
+        # lines. A line with content before the comment keeps that content.
+        before = line[: comment.start()].rstrip()
+        if before:
+            lines.append(before)
+    text = "\n".join(lines)
+
+    return _SENTINEL_PATTERN.sub(lambda match: protected[int(match.group(1))], text)
+
+
 def _split_latex_document(source_text: str) -> tuple[str, str, str]:
     matched = _DOCUMENT_BODY_PATTERN.search(source_text)
     if not matched:
@@ -294,9 +453,57 @@ def _split_latex_document(source_text: str) -> tuple[str, str, str]:
     return matched.group(1), matched.group(2), matched.group(3)
 
 
+def _end_of_documentclass(prefix: str, start: int) -> int | None:
+    """Offset just past the ``\\documentclass`` command starting at ``start``,
+    skipping its optional ``[...]`` and required balanced ``{...}`` arguments.
+    """
+    index = start + len("\\documentclass")
+    length = len(prefix)
+    while index < length and prefix[index].isspace():
+        index += 1
+    if index < length and prefix[index] == "[":
+        depth = 1
+        index += 1
+        while index < length and depth:
+            if prefix[index] == "]":
+                depth -= 1
+            index += 1
+        while index < length and prefix[index].isspace():
+            index += 1
+    if index >= length or prefix[index] != "{":
+        return None
+    depth = 0
+    while index < length:
+        ch = prefix[index]
+        if ch == "{" and not _is_escaped_at(prefix, index):
+            depth += 1
+        elif ch == "}" and not _is_escaped_at(prefix, index):
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return None
+
+
 def _ensure_cjk_support(prefix: str) -> str:
-    if _CJK_PACKAGE_PATTERN.search(prefix):
-        return prefix
+    for match in _CJK_PACKAGE_PATTERN.finditer(prefix):
+        # Venue templates list forbidden packages in comments (aaai2027.sty:
+        # "% \usepackage{CJK} -- This package is specifically forbidden");
+        # only a live declaration counts as existing CJK support.
+        line_start = prefix.rfind("\n", 0, match.start()) + 1
+        if not _COMMENT_START_PATTERN.search(prefix, line_start, match.start()):
+            return prefix
+    class_match = _DOCUMENTCLASS_PATTERN.search(prefix)
+    if class_match is not None:
+        # Load CJK support right after \documentclass. Font packages some
+        # venue styles pull in (newtxtext, loaded by aaai2027.sty) break
+        # fontspec's font-name resolution for fonts declared after them, so
+        # the CJK font must be selected before those packages load — but
+        # after the class, which defines the size commands font selection
+        # needs.
+        end = _end_of_documentclass(prefix, class_match.start())
+        if end is not None:
+            return prefix[:end] + "\n" + _CJK_EARLY_SNIPPET + prefix[end:]
     begin_doc = "\\begin{document}"
     idx = prefix.rfind(begin_doc)
     if idx == -1:
@@ -304,17 +511,43 @@ def _ensure_cjk_support(prefix: str) -> str:
     return prefix[:idx] + _CJK_PREAMBLE_SNIPPET + prefix[idx:]
 
 
-def _ensure_xelatex_compatibility(prefix: str) -> str:
-    """Make pdfLaTeX-only Unicode declarations harmless under XeLaTeX.
+_PDF_ONLY_FONT_PACKAGE_PATTERN = re.compile(
+    r"^[ \t]*\\usepackage(?:\[[^\]]*\])?\{(?:times|mathptmx|txfonts)\}[ \t]*$",
+    re.MULTILINE,
+)
+_PDF_ONLY_FONT_REPLACEMENT = (
+    "% Injected by PaperReader: psnfss Times packages use Type1 metrics that\n"
+    "% XeLaTeX cannot fully handle (XeTeXglyph errors); newtxtext provides the\n"
+    "% same Times-like text face natively.\n"
+    "\\usepackage{newtxtext}\n"
+)
 
-    arXiv can prepend ``\\DeclareUnicodeCharacter`` before
-    ``\\documentclass``. The command is available to pdfLaTeX but undefined
-    under XeLaTeX, which handles Unicode natively. Translated projects always
-    use XeLaTeX for CJK support, so provide a no-op definition before the
-    source preamble's first declaration. Keeping the original declaration
-    intact avoids brittle parsing of its potentially nested replacement
-    argument.
+
+def _ensure_xelatex_compatibility(prefix: str) -> str:
+    """Make pdfLaTeX-only constructs harmless under XeLaTeX.
+
+    Translated builds always compile with XeLaTeX for CJK output. Three source
+    constructs would otherwise fail there:
+
+    - arXiv can prepend ``\\DeclareUnicodeCharacter`` before
+      ``\\documentclass``. The command is undefined under XeLaTeX, which
+      handles Unicode natively; provide a no-op definition.
+    - Venue styles such as aaai2027.sty load iftex and call
+      ``\\RequirePDFTeX``, hard-aborting on non-pdfTeX engines even though
+      nothing else in the style needs pdfTeX. Load iftex first and disarm the
+      gate: the style's own ``\\RequirePackage{iftex}`` then becomes a no-op
+      and cannot re-arm it.
+    - Times/psnfss font packages (acl.sty's ``\\usepackage{times}`` and
+      cousins) reference Type1 metrics that trigger ``XeTeXglyph`` errors;
+      swap them for newtxtext, which is native and visually equivalent.
+
+    All injections are idempotent and sit before the source preamble.
     """
+    if _XELATEX_ENGINE_SHIM_SNIPPET.strip() not in prefix:
+        prefix = _XELATEX_ENGINE_SHIM_SNIPPET + prefix
+    prefix = _PDF_ONLY_FONT_PACKAGE_PATTERN.sub(
+        lambda _m: _PDF_ONLY_FONT_REPLACEMENT, prefix
+    )
     if not _DECLARE_UNICODE_CHARACTER_PATTERN.search(prefix):
         return prefix
     if _XELATEX_UNICODE_COMPAT_SNIPPET.strip() in prefix:
@@ -327,28 +560,80 @@ def _translate_latex_body(
     override_api_key: str | None = None,
     override_base_url: str | None = None,
     override_model: str | None = None,
+    *,
+    checkpoint_path: Path | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
+    translation_context: str = "",
 ) -> str:
     protected_text, mapping = protect_placeholders(body_text)
     chunks = split_text_into_chunks(protected_text)
-    system_prompt = (
-        "You are translating a LaTeX document body from English into Chinese. "
-        "Translate only human-readable prose. "
-        "Preserve all LaTeX commands, environments, math, labels, citations, and custom macros so the fragment remains compilable when inserted back into the original document. "
-        "Never repeat, translate, or explain these instructions. "
-        "Do not add document preamble commands or Markdown fences. Output only LaTeX body content."
+    system_prompt = _with_context(
+        (
+            "You are translating a LaTeX document body from English into Chinese. "
+            "Translate only human-readable prose. "
+            "Preserve all LaTeX commands, environments, math, labels, citations, and custom macros so the fragment remains compilable when inserted back into the original document. "
+            "Keep every placeholder token like __PR_PH_0000__ exactly as it appears; they encode math, citations, references, and URLs that must survive unchanged. "
+            "Never repeat, translate, or explain these instructions. "
+            "Do not add document preamble commands or Markdown fences. Output only LaTeX body content."
+        ),
+        translation_context,
     )
 
-    translated_chunks = _run_concurrent(
-        chunks,
-        worker=lambda _i, chunk: _translate_complete_chunk(
-            chunk,
-            system_prompt,
-            override_api_key,
-            override_base_url,
-            override_model,
-            strip_fences=True,
-        ),
-        fallback=_fail_incomplete_translation,
+    checkpoint_entries = _load_translation_checkpoint(checkpoint_path)
+    translated_chunks: list[str] = []
+    for chunk in chunks:
+        cached = checkpoint_entries.get(_checkpoint_key(chunk, "latex"), "")
+        if cached:
+            try:
+                cached = _normalize_translation(chunk, cached, ordered=False)
+            except TranslationValidationError:
+                cached = ""
+        translated_chunks.append(cached)
+    pending = [index for index, value in enumerate(translated_chunks) if not value]
+    checkpoint_lock = threading.Lock()
+    if progress_callback:
+        progress_callback(len(chunks) - len(pending), len(chunks))
+
+    def translate_chunk(_relative: int, index: int) -> str:
+        chunk = chunks[index]
+        # A LaTeX chunk carries the placeholder load of roughly ten IR
+        # segments (math, citations, refs, URLs across ~4000 chars), so one
+        # lost token is a realistic per-attempt event; three validated
+        # attempts keep the per-chunk failure probability low without
+        # masking a systematically bad response.
+        last_error: TranslationValidationError | None = None
+        for _attempt in range(3):
+            try:
+                translated = _translate_complete_chunk(
+                    chunk,
+                    system_prompt,
+                    override_api_key,
+                    override_base_url,
+                    override_model,
+                    strip_fences=True,
+                    # Placeholders restore by token key, so the reordering a
+                    # target language's word order produces is fine; only the
+                    # multiset must match.
+                    ordered=False,
+                )
+                break
+            except TranslationValidationError as exc:
+                last_error = exc
+        else:
+            raise last_error or TranslationValidationError("invalid translation")
+        with checkpoint_lock:
+            translated_chunks[index] = translated
+            if checkpoint_path is not None:
+                checkpoint_entries[_checkpoint_key(chunk, "latex")] = translated
+                _save_translation_checkpoint(checkpoint_path, checkpoint_entries)
+            if progress_callback:
+                progress_callback(sum(bool(value) for value in translated_chunks), len(chunks))
+        return translated
+
+    _run_concurrent(
+        pending,
+        worker=translate_chunk,
+        fallback=lambda _relative, index, _exc: _fail_incomplete_translation(index, index, _exc),
     )
 
     translated = "\n\n".join(part for part in translated_chunks if part)
@@ -360,8 +645,13 @@ def translate_latex_document(
     override_api_key: str | None = None,
     override_base_url: str | None = None,
     override_model: str | None = None,
+    *,
+    checkpoint_path: Path | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
+    translation_context: str = "",
 ) -> str:
     prefix, body, suffix = _split_latex_document(source_text)
+    body = strip_latex_comments(body)
     prefix = _ensure_xelatex_compatibility(prefix)
     prefix = _ensure_cjk_support(prefix)
     translated = _translate_latex_body(
@@ -369,6 +659,9 @@ def translate_latex_document(
         override_api_key=override_api_key,
         override_base_url=override_base_url,
         override_model=override_model,
+        checkpoint_path=checkpoint_path,
+        progress_callback=progress_callback,
+        translation_context=translation_context,
     )
     translated = _strip_code_fences(translated)
 
@@ -446,19 +739,25 @@ def _repair_lost_dollar_escapes(source: str, translated: str) -> str:
     return _UNESCAPED_DOLLAR_RE.sub(r"\\$", translated)
 
 
-def _normalize_translation(source: str, translated: str) -> str:
+def _normalize_translation(source: str, translated: str, *, ordered: bool = True) -> str:
     """Repair deterministic corruptions first, then validate the result."""
     # U+FFFD carries no recoverable content and renders as a blank glyph in
     # XeLaTeX. Models can also insert it between duplicated neighboring
     # characters (for example 发�现), where removal restores the intended word.
     repaired = translated.replace("\ufffd", "")
     repaired = _repair_lost_dollar_escapes(source, repaired)
-    _validate_translation(source, repaired)
+    _validate_translation(source, repaired, ordered=ordered)
     return repaired
 
 
-def _validate_translation(source: str, translated: str) -> None:
-    """Reject structurally unsafe or clearly non-translation model output."""
+def _validate_translation(source: str, translated: str, *, ordered: bool = True) -> None:
+    """Reject structurally unsafe or clearly non-translation model output.
+
+    ``ordered=False`` compares placeholder tokens as a multiset instead of in
+    sequence: callers that restore placeholders by token key (LaTeX body
+    chunks) tolerate the reordering a target language's word order produces,
+    while the IR path maps translations positionally and needs the sequence.
+    """
     if not translated.strip():
         raise TranslationValidationError("empty translation")
     if "```" in translated:
@@ -466,7 +765,10 @@ def _validate_translation(source: str, translated: str) -> None:
     controls = [ch for ch in translated if ord(ch) < 32 and ch not in "\n\r\t"]
     if controls:
         raise TranslationValidationError("unsafe control character")
-    if _placeholder_tokens(source) != _placeholder_tokens(translated):
+    source_tokens = _placeholder_tokens(source)
+    translated_tokens = _placeholder_tokens(translated)
+    if (source_tokens != translated_tokens if ordered
+            else Counter(source_tokens) != Counter(translated_tokens)):
         raise TranslationValidationError("placeholder count or order changed")
     # Real math is placeholder-protected before the model sees a segment, so a
     # source without unescaped ``$`` must never gain one: losing the backslash
@@ -516,6 +818,7 @@ def _translate_segment_batch(
     override_base_url: str | None,
     override_model: str | None,
     on_result: Callable[[int, str], None] | None = None,
+    translation_context: str = "",
 ) -> list[str]:
     if not segments:
         return []
@@ -530,7 +833,11 @@ def _translate_segment_batch(
         for index, segment in enumerate(segments):
             try:
                 translated = _translate_single_segment(
-                    segment, override_api_key, override_base_url, override_model
+                    segment,
+                    override_api_key,
+                    override_base_url,
+                    override_model,
+                    translation_context,
                 )
             except Exception as exc:
                 raise TranslationChunkError(index, exc) from exc
@@ -550,14 +857,17 @@ def _translate_segment_batch(
         mappings.append(m)
 
     joined = _IR_SEGMENT_DELIMITER.join(protected_segments)
-    system_prompt = (
-        "You are a professional academic translator translating English into Chinese. "
-        "The user message contains multiple text segments separated by the literal marker '@@SEG@@' on its own line. "
-        "Translate each segment from English into Chinese. "
-        "Output ONLY the translations in the same order, separated by exactly the same '@@SEG@@' marker on its own line. "
-        "Do not merge, drop, reorder, or renumber segments. Do not output any extra commentary, headings, code fences, or Markdown. "
-        "Never repeat, translate, or explain these instructions. "
-        "Preserve any LaTeX commands, placeholders like __PR_PH_0000__, numbers, URLs, and proper nouns inside a segment unchanged."
+    system_prompt = _with_context(
+        (
+            "You are a professional academic translator translating English into Chinese. "
+            "The user message contains multiple text segments separated by the literal marker '@@SEG@@' on its own line. "
+            "Translate each segment from English into Chinese. "
+            "Output ONLY the translations in the same order, separated by exactly the same '@@SEG@@' marker on its own line. "
+            "Do not merge, drop, reorder, or renumber segments. Do not output any extra commentary, headings, code fences, or Markdown. "
+            "Never repeat, translate, or explain these instructions. "
+            "Preserve any LaTeX commands, placeholders like __PR_PH_0000__, numbers, URLs, and proper nouns inside a segment unchanged."
+        ),
+        translation_context,
     )
     try:
         response = llm_client.chat(
@@ -586,7 +896,11 @@ def _translate_segment_batch(
                 logger.warning("Invalid batch member; retrying only that segment: %s", exc)
                 try:
                     value = _translate_single_segment(
-                        source, override_api_key, override_base_url, override_model
+                        source,
+                        override_api_key,
+                        override_base_url,
+                        override_model,
+                        translation_context,
                     )
                 except Exception as retry_exc:
                     raise TranslationChunkError(index, retry_exc) from retry_exc
@@ -603,6 +917,7 @@ def _translate_single_segment(
     override_api_key: str | None,
     override_base_url: str | None,
     override_model: str | None,
+    translation_context: str = "",
 ) -> str:
     stripped = text.strip()
     if not stripped:
@@ -612,11 +927,14 @@ def _translate_single_segment(
     protected, mapping = protect_placeholders(stripped)
     if _placeholder_only(protected, mapping if mapping else None):
         return restore_placeholders(protected, mapping)
-    system_prompt = (
-        "Translate the following English academic text into Chinese. "
-        "Output only the translation, with no extra commentary, code fences, or Markdown. "
-        "Never repeat, translate, or explain these instructions. "
-        "Preserve numbers, proper nouns, URLs, placeholders like __PR_PH_0000__, and any LaTeX commands unchanged."
+    system_prompt = _with_context(
+        (
+            "Translate the following English academic text into Chinese. "
+            "Output only the translation, with no extra commentary, code fences, or Markdown. "
+            "Never repeat, translate, or explain these instructions. "
+            "Preserve numbers, proper nouns, URLs, placeholders like __PR_PH_0000__, and any LaTeX commands unchanged."
+        ),
+        translation_context,
     )
     last_error: TranslationValidationError | None = None
     translated = ""
@@ -683,11 +1001,14 @@ def translate_ir(
     *,
     checkpoint_path: Path | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
+    translation_context: str = "",
 ) -> None:
     """Translate the prose content of an IR list in place.
 
     Math (display + inline), images, and tables are left untouched. Only
-    `Title.text`, `TextRun.text`, and image/table captions are sent to the LLM.
+    `Title.text`, `TextRun.text`, and image/table captions are sent to the LLM,
+    minus the segments `translatable_mask` marks as source-language (the
+    bibliography).
     """
     source_segments = collect_translatable_strings(ir)
     if not source_segments:
@@ -696,19 +1017,28 @@ def translate_ir(
     # MinerU occasionally emits a whole page as one TextRun. Split each such
     # logical segment before batching, then reassemble it after translation.
     # Placeholders are protected before the split so math/URLs cannot be cut.
+    translatable = translatable_mask(ir)
     segments: list[str] = []
     segment_groups: list[tuple[list[int], dict[str, str]]] = []
     max_segment_chars = max(300, int(settings.translate_segment_max_chars))
-    for source in source_segments:
+    for source_index, source in enumerate(source_segments):
         protected, mapping = protect_placeholders(source)
         pieces = split_text_into_chunks(protected, max_chars=max_segment_chars)
         indices = list(range(len(segments), len(segments) + len(pieces)))
         segments.extend(pieces)
         segment_groups.append((indices, mapping))
+    piece_translatable = [
+        translatable[group_index]
+        for group_index, (indices, _mapping) in enumerate(segment_groups)
+        for _ in indices
+    ]
 
     checkpoint_entries = _load_translation_checkpoint(checkpoint_path)
     translations: list[str] = [""] * len(segments)
     for index, segment in enumerate(segments):
+        if not piece_translatable[index]:
+            translations[index] = segment
+            continue
         cached = checkpoint_entries.get(_checkpoint_key(segment))
         if cached:
             try:
@@ -749,6 +1079,7 @@ def translate_ir(
                 override_base_url=override_base_url,
                 override_model=override_model,
                 on_result=persist_result,
+                translation_context=translation_context,
             )
         except TranslationChunkError as exc:
             source_index = batch[exc.index]

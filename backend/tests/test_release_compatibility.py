@@ -106,7 +106,7 @@ def test_legacy_chat_request_shape_still_works_after_login(isolated_storage, mon
 
 def test_desktop_health_version():
     with TestClient(app) as client:
-        assert client.get('/health').json() == {'status': 'ok', 'app': 'PaperReader', 'version': '2.1.7'}
+        assert client.get('/health').json() == {'status': 'ok', 'app': 'PaperReader', 'version': '2.1.8'}
 
 
 def test_release_version_metadata_stays_in_sync():

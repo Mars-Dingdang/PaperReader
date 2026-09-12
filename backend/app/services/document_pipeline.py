@@ -23,6 +23,8 @@ from app.services.latex_service import (
     create_translated_tex,
     create_translated_tex_from_ir,
     ensure_portable_cjk_font_config,
+    extract_tex_title,
+    flatten_tex_project,
 )
 from app.services.mineru_layout import (
     Image as IRImage,
@@ -56,6 +58,7 @@ from app.services.stage_tracker import (
     with_stage,
 )
 from app.services.translate_service import (
+    build_translation_context,
     translate_ir,
     translate_latex_document,
     translate_text,
@@ -66,10 +69,6 @@ from app.services.auth_service import UserSettings
 _REFERENCE_SPLIT_PATTERN = re.compile(r"(?im)^\s*(references|bibliography)\s*$")
 _REFERENCE_ITEM_PATTERN = re.compile(r"^\s*(\[\d+\]|\d+\.|\d+\))\s+(.+)")
 _NOUGAT_MISSING_PAGE_PATTERN = re.compile(r"^\s*\[MISSING_PAGE[^\]]*\]\s*$", re.MULTILINE)
-_ABSTRACT_AT_START_PATTERN = re.compile(r"^\s*\*\*Abstract\*\*\s*", re.IGNORECASE)
-_PROBLEM1_HEADING_PATTERN = re.compile(r"(?im)^\s*##\s*Problem\s*1\b")
-_PROBLEM2_HEADING_PATTERN = re.compile(r"(?im)^\s*##\s*Problem\s*2\b")
-_FIRST_PROBLEM_HEADING_PATTERN = re.compile(r"(?im)^\s*##\s*Problem\s*(\d+)\b")
 _TITLE_H1_PATTERN = re.compile(r"(?m)^#\s+(.+)$")
 
 
@@ -133,51 +132,18 @@ def _recover_missing_leading_text(primary_text: str, fallback_text: str) -> tupl
     return primary_text, False
 
 
-def _clean_nougat_text_with_metadata(text: str, leading_fallback_text: str = "") -> tuple[str, int, int, bool]:
+def _clean_nougat_text_with_metadata(text: str, leading_fallback_text: str = "") -> tuple[str, int, bool]:
+    """Strip extraction artifacts that would corrupt downstream stages.
+
+    Removes missing-page markers, recovers a leading section the primary text
+    lost (matched against the PDF's embedded text layer), and collapses
+    blank-line runs.
+    """
     missing_page_count = len(_NOUGAT_MISSING_PAGE_PATTERN.findall(text))
     cleaned = _NOUGAT_MISSING_PAGE_PATTERN.sub("", text)
     cleaned, recovered_leading = _recover_missing_leading_text(cleaned, leading_fallback_text)
-    repaired_up_to = 0
-
-    first_problem_match = _FIRST_PROBLEM_HEADING_PATTERN.search(cleaned)
-    first_problem_no = int(first_problem_match.group(1)) if first_problem_match else 0
-
-    if (
-        first_problem_no == 2
-        and _ABSTRACT_AT_START_PATTERN.match(cleaned)
-        and _PROBLEM2_HEADING_PATTERN.search(cleaned)
-        and not _PROBLEM1_HEADING_PATTERN.search(cleaned)
-    ):
-        lines = cleaned.splitlines()
-        for idx, line in enumerate(lines):
-            if line.strip():
-                if line.strip().lower() == "**abstract**":
-                    lines.pop(idx)
-                break
-        cleaned = "\n".join(lines)
-        cleaned = f"## Problem 1\n\n{cleaned.lstrip()}"
-        repaired_up_to = 1
-    elif first_problem_no > 1 and not _PROBLEM1_HEADING_PATTERN.search(cleaned):
-        first_start = first_problem_match.start()
-        preamble = cleaned[:first_start].strip()
-        rest = cleaned[first_start:]
-        if first_problem_no == 2 and preamble:
-            cleaned = f"## Problem 1\n\n{preamble}\n\n{rest.lstrip()}"
-        else:
-            stubs = "\n\n".join(
-                f"## Problem {n}\n\n[Content not extracted by Nougat]"
-                for n in range(1, first_problem_no)
-            )
-            cleaned = f"{stubs}\n\n{rest.lstrip()}"
-        repaired_up_to = first_problem_no - 1
-
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned.strip(), repaired_up_to, missing_page_count, recovered_leading
-
-
-def _clean_nougat_text(text: str) -> tuple[str, int, int]:
-    cleaned, repaired_up_to, missing_page_count, _ = _clean_nougat_text_with_metadata(text)
-    return cleaned, repaired_up_to, missing_page_count
+    return cleaned.strip(), missing_page_count, recovered_leading
 
 
 def _derive_display_title(source_filename: str, extracted_text: str) -> tuple[str, bool]:
@@ -534,6 +500,13 @@ def _resume_pdf_translation(
     provider_settings: UserSettings | None,
 ) -> None:
     display_title, _ = _derive_display_title(record.source_filename, record.extracted_text)
+    translation_context = build_translation_context(
+        display_title,
+        record.extracted_text,
+        override_api_key=override_api_key,
+        override_base_url=override_base_url,
+        override_model=override_model,
+    )
     translated_tex = output_dir / "translated.tex"
     with with_stage(record, "translate"):
         ir_blocks = (
@@ -555,6 +528,7 @@ def _resume_pdf_translation(
                     done / max(1, total),
                     f"翻译 {done}/{total} 个片段",
                 ),
+                translation_context=translation_context,
             )
             translated_segments = collect_translatable_strings(ir_blocks)
             alignment_path = save_exact_alignment(record, source_segments, translated_segments)
@@ -578,6 +552,7 @@ def _resume_pdf_translation(
                 progress_callback=lambda done, total: set_stage_progress(
                     record, "translate", done / max(1, total), f"翻译 {done}/{total} 个片段"
                 ),
+                translation_context=translation_context,
             )
             record.translated_text = translated
             create_translated_tex(translated, translated_tex, title=display_title)
@@ -593,6 +568,106 @@ def _resume_pdf_translation(
             record.last_compile_warning = compile_result.warning
             record.logs.append(f"LaTeX warning: {compile_result.warning}")
         _publish_translated_pdf(record, compile_result.pdf_path, output_dir)
+
+
+def _finish_tex_translation(
+    record: DocumentRecord,
+    output_dir: Path,
+    *,
+    provider_settings: UserSettings | None,
+    vision_model: str | None,
+    override_api_key: str | None,
+    override_base_url: str | None,
+) -> None:
+    """Vision check + translated compile after a fresh or resumed translation."""
+    if record.vision_check_enabled:
+        with with_stage(record, "vision_check"):
+            try:
+                record.translated_text = run_vision_check_on_markdown(
+                    record,
+                    pdf_path=output_dir / "original.pdf",
+                    text=record.translated_text,
+                    output_dir=output_dir,
+                    api_key=override_api_key,
+                    base_url=override_base_url,
+                    model=vision_model,
+                )
+            except Exception as exc:  # never block the pipeline on vision check
+                record.logs.append(f"Vision check skipped: {exc}")
+
+    with with_stage(record, "compile_translated"):
+        translated_tex = output_dir / "translated.tex"
+        translated_tex.write_text(record.translated_text, encoding="utf-8")
+        record.translated_tex_path = translated_tex
+        _append_artifact(record, "translated.tex", "translated_tex", translated_tex)
+        record.logs.append(f"Translated TEX: {translated_tex}")
+        save_document(record)
+
+        structure_issues = validate_math_structure(record.translated_text)
+        if structure_issues:
+            digest = "; ".join(f"L{line}: {msg}" for line, msg in structure_issues[:5])
+            record.logs.append(
+                f"LaTeX structure check found {len(structure_issues)} issue(s): {digest}"
+            )
+        compile_result = _compile_translated_tex_project(
+            record, translated_tex, output_dir, provider_settings
+        )
+        if compile_result.warning:
+            record.last_compile_warning = compile_result.warning
+            record.logs.append(f"LaTeX warning: {compile_result.warning}")
+
+        _publish_translated_pdf(record, compile_result.pdf_path, output_dir)
+
+
+def _resume_tex_translation(
+    record: DocumentRecord,
+    output_dir: Path,
+    *,
+    override_api_key: str | None,
+    override_base_url: str | None,
+    override_model: str | None,
+    provider_settings: UserSettings | None,
+    vision_model: str | None,
+) -> None:
+    """Continue a failed TeX translation from its chunk checkpoint.
+
+    ``compile_original`` was completed by the interrupted run and its stage is
+    still marked done, so only the chunks missing from the checkpoint are
+    re-translated.
+    """
+    tex_content = record.extracted_text or ""
+    with with_stage(record, "translate"):
+        record.logs.append("Resuming LaTeX translation from checkpoint")
+        translation_context = build_translation_context(
+            extract_tex_title(tex_content),
+            tex_content,
+            override_api_key=override_api_key,
+            override_base_url=override_base_url,
+            override_model=override_model,
+        )
+        translated = translate_latex_document(
+            tex_content,
+            override_api_key=override_api_key,
+            override_base_url=override_base_url,
+            override_model=override_model,
+            checkpoint_path=output_dir / "translation-checkpoint.json",
+            progress_callback=lambda done, total: set_stage_progress(
+                record, "translate", done / max(1, total), f"翻译 {done}/{total} 个片段"
+            ),
+            translation_context=translation_context,
+        )
+        if "\\begin{document}" not in translated or "\\end{document}" not in translated:
+            raise RuntimeError("LLM did not return a complete LaTeX document")
+        record.translated_text = translated
+
+    _finish_tex_translation(
+        record,
+        output_dir,
+        provider_settings=provider_settings,
+        vision_model=vision_model,
+        override_api_key=override_api_key,
+        override_base_url=override_base_url,
+    )
 
 
 def create_document_record(source_path: Path, source_type: str, owner_user_id: int = 0) -> DocumentRecord:
@@ -736,6 +811,24 @@ def process_document(
                 record.logs.append("Extraction checkpoint missing or invalid; falling back to parse")
 
         if record.source_type in ("tex", "tex_project"):
+            if resume_from == "translate":
+                tex_checkpoint = output_dir / "translation-checkpoint.json"
+                if record.extracted_text and tex_checkpoint.is_file():
+                    _resume_tex_translation(
+                        record,
+                        output_dir,
+                        override_api_key=override_api_key,
+                        override_base_url=override_base_url,
+                        override_model=override_model,
+                        provider_settings=provider_settings,
+                        vision_model=vision_model,
+                    )
+                    record.status = "done"
+                    record.failure = None
+                    record.logs.append("Processing done")
+                    return save_document(record)
+                record.logs.append("Translation checkpoint missing; restarting from compile")
+
             with with_stage(record, "compile_original"):
                 record.logs.append("Compiling source TEX")
                 original_pdf = compile_tex_project(record.source_path, output_dir)
@@ -744,7 +837,7 @@ def process_document(
                 record.original_pdf_url = f"/data/outputs/{record.document_id}/original.pdf"
                 _append_artifact(record, "original.pdf", "original_pdf", original_out)
 
-                tex_content = record.source_path.read_text(encoding="utf-8", errors="ignore")
+                tex_content = flatten_tex_project(record.source_path)
                 record.extracted_text = tex_content
                 _append_artifact(record, record.source_path.name, "source_tex", record.source_path)
 
@@ -757,54 +850,36 @@ def process_document(
 
             with with_stage(record, "translate"):
                 record.logs.append("Translating LaTeX source")
-                translated = translate_latex_document(
+                translation_context = build_translation_context(
+                    extract_tex_title(tex_content) or display_title,
                     tex_content,
                     override_api_key=override_api_key,
                     override_base_url=override_base_url,
                     override_model=override_model,
                 )
+                translated = translate_latex_document(
+                    tex_content,
+                    override_api_key=override_api_key,
+                    override_base_url=override_base_url,
+                    override_model=override_model,
+                    checkpoint_path=output_dir / "translation-checkpoint.json",
+                    progress_callback=lambda done, total: set_stage_progress(
+                        record, "translate", done / max(1, total), f"翻译 {done}/{total} 个片段"
+                    ),
+                    translation_context=translation_context,
+                )
                 if "\\begin{document}" not in translated or "\\end{document}" not in translated:
                     raise RuntimeError("LLM did not return a complete LaTeX document")
                 record.translated_text = translated
 
-            if record.vision_check_enabled:
-                with with_stage(record, "vision_check"):
-                    try:
-                        record.translated_text = run_vision_check_on_markdown(
-                            record,
-                            pdf_path=output_dir / "original.pdf",
-                            text=record.translated_text,
-                            output_dir=output_dir,
-                            api_key=override_api_key,
-                            base_url=override_base_url,
-                            model=vision_model,
-                        )
-                    except Exception as exc:  # never block the pipeline on vision check
-                        record.logs.append(f"Vision check skipped: {exc}")
-
-            with with_stage(record, "compile_translated"):
-                translated_tex = output_dir / "translated.tex"
-                translated_tex.write_text(record.translated_text, encoding="utf-8")
-                record.translated_tex_path = translated_tex
-                _append_artifact(record, "translated.tex", "translated_tex", translated_tex)
-                record.logs.append(f"Translated TEX: {translated_tex}")
-                save_document(record)
-
-                structure_issues = validate_math_structure(record.translated_text)
-                if structure_issues:
-                    digest = "; ".join(f"L{line}: {msg}" for line, msg in structure_issues[:5])
-                    record.logs.append(
-                        f"LaTeX structure check found {len(structure_issues)} issue(s): {digest}"
-                    )
-                compile_result = _compile_translated_tex_project(
-                    record, translated_tex, output_dir, provider_settings
-                )
-                translated_pdf = compile_result.pdf_path
-                if compile_result.warning:
-                    record.last_compile_warning = compile_result.warning
-                    record.logs.append(f"LaTeX warning: {compile_result.warning}")
-
-                _publish_translated_pdf(record, translated_pdf, output_dir)
+            _finish_tex_translation(
+                record,
+                output_dir,
+                provider_settings=provider_settings,
+                vision_model=vision_model,
+                override_api_key=override_api_key,
+                override_base_url=override_base_url,
+            )
 
             record.status = "done"
             record.logs.append("Processing done")
@@ -871,7 +946,7 @@ def process_document(
                 device_or_mode = mineru_result.mode_label
                 nougat_files = mineru_result.extracted_files
                 fallback_text = extract_text_from_pdf_text_layer(str(record.source_path), max_pages=3)
-                record.extracted_text, repaired_up_to, missing_page_count, recovered_leading = _clean_nougat_text_with_metadata(
+                record.extracted_text, missing_page_count, recovered_leading = _clean_nougat_text_with_metadata(
                     extracted_text,
                     leading_fallback_text=fallback_text,
                 )
@@ -888,10 +963,6 @@ def process_document(
                 if recovered_leading:
                     record.logs.append("Recovered leading PDF content from embedded text layer")
                 record.logs.append("MinerU output cleaned")
-                if repaired_up_to == 1:
-                    record.logs.append("Heading repaired: inserted Problem 1")
-                elif repaired_up_to > 1:
-                    record.logs.append(f"Heading repaired: inserted Problems 1-{repaired_up_to}")
                 record.logs.append(f"Extraction model: {device_or_mode}")
                 record.logs.append(f"Extraction dir: {extract_dir}")
                 for generated in nougat_files:
@@ -931,6 +1002,13 @@ def process_document(
                         )
 
                 translated_tex = output_dir / "translated.tex"
+                translation_context = build_translation_context(
+                    display_title,
+                    record.extracted_text,
+                    override_api_key=override_api_key,
+                    override_base_url=override_base_url,
+                    override_model=override_model,
+                )
 
                 if ir_blocks is not None:
                     record.logs.append("Translating structured blocks")
@@ -947,6 +1025,7 @@ def process_document(
                             done / max(1, total),
                             f"翻译 {done}/{total} 个片段",
                         ),
+                        translation_context=translation_context,
                     )
                     translated_alignment_segments = collect_translatable_strings(ir_blocks)
                     alignment_path = save_exact_alignment(
@@ -984,6 +1063,7 @@ def process_document(
                             done / max(1, total),
                             f"翻译 {done}/{total} 个片段",
                         ),
+                        translation_context=translation_context,
                     )
                     record.translated_text = translated
                     repairs = create_translated_tex(translated, translated_tex, title=display_title)

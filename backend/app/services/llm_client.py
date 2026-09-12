@@ -71,7 +71,9 @@ class OpenAICompatClient:
             max_retries = settings.translate_max_retries
 
         if not api_key:
-            return "No API key configured. Set OPENAI_API_KEY or provide override_api_key."
+            raise RuntimeError(
+                "No API key configured. Set OPENAI_API_KEY or provide override_api_key."
+            )
 
         client = self._default_client
         if override_api_key or override_base_url:

@@ -343,3 +343,116 @@ def test_translate_ir_repairs_chunk_that_loses_currency_escape(monkeypatch):
     assert ir[0].runs[0].text == "shirt \\$10.99 Big & Tall"
     assert ir[0].runs[1].text == "第二段"
     assert len(calls) == 1
+
+
+def _references_ir():
+    from app.services.mineru_layout import ListBlock
+
+    return [
+        Title(level=1, text="Introduction"),
+        Paragraph(runs=[TextRun(text="Body prose about agents.")]),
+        Title(level=1, text="References"),
+        ListBlock(
+            list_type="reference_list",
+            items=[[TextRun(text="[1] Wang et al. Agent safety, 2025.")]],
+        ),
+        Paragraph(runs=[TextRun(text="[2] Ren et al. Power regulation, 2025.")]),
+        Title(level=1, text="Appendix"),
+        Paragraph(runs=[TextRun(text="Appendix training details.")]),
+    ]
+
+
+def test_translatable_mask_marks_reference_region():
+    from app.services.mineru_layout import collect_translatable_strings, translatable_mask
+
+    ir = _references_ir()
+    strings = collect_translatable_strings(ir)
+    mask = translatable_mask(ir)
+
+    assert len(mask) == len(strings)
+    assert mask[0] and mask[1], "pre-reference content translates"
+    assert not mask[2], "References heading stays English"
+    assert not mask[3] and not mask[4], "bibliography entries stay English"
+    assert mask[5] and mask[6], "content after the section still translates"
+
+
+def test_translate_ir_leaves_references_untranslated(monkeypatch):
+    sent: list[str] = []
+
+    def fake_chat(message, system_prompt, **kwargs):
+        if "@@SEG@@" in message:
+            sent.append(message)
+            parts = message.split("@@SEG@@")
+            return "@@SEG@@".join(f"[译]{p.strip()}" for p in parts)
+        sent.append(message)
+        return f"[译]{message.strip()}"
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", fake_chat)
+
+    ir = _references_ir()
+    translate_service.translate_ir(ir)
+
+    assert ir[0].text.startswith("[译]")
+    assert ir[1].runs[0].text.startswith("[译]")
+    assert ir[2].text == "References"
+    assert ir[3].items[0][0].text == "[1] Wang et al. Agent safety, 2025."
+    assert ir[4].runs[0].text == "[2] Ren et al. Power regulation, 2025."
+    assert ir[5].text.startswith("[译]")
+    assert ir[6].runs[0].text.startswith("[译]")
+
+    joined = "\n".join(sent)
+    assert "[1] Wang et al." not in joined
+    assert "Body prose about agents." in joined
+    assert "Appendix training details." in joined
+
+
+def test_translate_ir_injects_translation_context_into_prompts(monkeypatch):
+    prompts: list[str] = []
+
+    def fake_chat(message, system_prompt, **kwargs):
+        prompts.append(system_prompt)
+        if "@@SEG@@" in message:
+            parts = message.split("@@SEG@@")
+            return "@@SEG@@".join(f"[译]{p.strip()}" for p in parts)
+        return f"[译]{message.strip()}"
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", fake_chat)
+
+    ir = _make_ir()
+    translate_service.translate_ir(
+        ir, translation_context='The paper title is "Hello World".'
+    )
+
+    assert prompts
+    assert all('The paper title is "Hello World".' in prompt for prompt in prompts)
+
+
+def test_build_translation_context_parses_glossary(monkeypatch):
+    def fake_chat(message, system_prompt, **kwargs):
+        assert "Paper title: DreamGuard" in message
+        return '```json\n{"terms": [{"en": "world model", "zh": "世界模型"}, "bad", {"en": ""}], "extra": 1}\n```'
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", fake_chat)
+
+    context = translate_service.build_translation_context(
+        "DreamGuard", "We train a world model for agents.", override_api_key="k"
+    )
+
+    assert 'The paper title is "DreamGuard"' in context
+    assert "world model = 世界模型" in context
+    assert "bad" not in context
+
+
+def test_build_translation_context_fails_open(monkeypatch):
+    def broken_chat(**kwargs):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(translate_service.llm_client, "chat", broken_chat)
+    assert translate_service.build_translation_context("T", "sample text") == ""
+
+    monkeypatch.setattr(
+        translate_service.llm_client, "chat", lambda **kwargs: "not json at all"
+    )
+    assert translate_service.build_translation_context("T", "sample text") == ""
+
+    assert translate_service.build_translation_context("T", "   ") == ""

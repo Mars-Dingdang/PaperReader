@@ -1,5 +1,15 @@
 # Upgrading PaperReader
 
+## Upgrading from v2.1.7 to v2.1.8
+
+PaperReader v2.1.8 is backward compatible and requires no data migration. Keep the existing `DATA_DIR`, database, `AUTH_SECRET_KEY`, provider settings, and TeX Live installation.
+
+LaTeX uploads now go through the same checkpointing as PDFs. Multi-file TeX projects are flattened (`\input`/`\include` inlined) before translation, so a paper whose prose lives in `sections/*.tex` is fully translated instead of silently left in English. Translation reports per-chunk progress ("翻译 n/m 个片段"), persists a chunk checkpoint, and comments are stripped from the document body before the LLM sees them — commented-out draft text never renders in the PDF and could previously break chunk validation. A failed or interrupted run resumes from the chunk checkpoint on retry without recompiling the original or re-translating finished chunks.
+
+Translated documents that load venue styles hard-gated to pdfTeX (for example `aaai2027.sty`) now compile under XeLaTeX: the translated preamble loads the engine tests first and disarms the `\RequirePDFTeX` gate, the CJK font setup loads right after `\documentclass` (before venue font packages, whose `newtxtext` breaks later font-name lookups), psnfss Times packages are swapped for `newtxtext`, and model-emitted faults are repaired deterministically: stray closing braces, bare text-mode underscores, and reflowed lines that put `[` directly after `\\`. Environment commands (`\begin{...}`/`\end{...}`) are carried through translation as validated placeholder tokens, so a model can no longer silently drop an environment opener. On the PDF side, bibliography sections are no longer sent to the LLM (they stay English and remain searchable), a terminology glossary and the paper title are injected into every translation batch for consistent wording, uploads stream to disk instead of being read fully into memory, and a missing API key raises a clear error instead of returning an error string as if it were a translation.
+
+Frontend, package-lock root metadata, API, desktop guides, and release notes are synchronized to `2.1.8`; the Git tag is `v2.1.8`.
+
 ## Upgrading from v2.1.6 to v2.1.7
 
 PaperReader v2.1.7 is backward compatible and requires no data migration. Keep the existing `DATA_DIR`, database, `AUTH_SECRET_KEY`, provider settings, and TeX Live installation.

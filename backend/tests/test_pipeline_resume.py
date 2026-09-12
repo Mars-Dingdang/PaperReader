@@ -60,7 +60,7 @@ def test_translation_retry_reuses_parse_checkpoint_and_finishes(isolated_storage
         assert kwargs["checkpoint_path"].parent.is_dir()
         apply_translations(ir, [f"译-{index}" for index, _ in enumerate(collect_translatable_strings(ir))])
 
-    def compile_ok(path, output_dir, compiler=None):
+    def compile_ok(path, output_dir, compiler=None, texinputs=None):
         pdf = output_dir / "translated.pdf"
         pdf.write_bytes(b"pdf")
         return LatexCompileResult(pdf)
@@ -111,7 +111,7 @@ def test_clean_retry_reuses_extraction_checkpoint(isolated_storage, monkeypatch)
     def translate_ok(ir, **kwargs):
         apply_translations(ir, [f"译-{index}" for index, _ in enumerate(collect_translatable_strings(ir))])
 
-    def compile_ok(path, output_dir, compiler=None):
+    def compile_ok(path, output_dir, compiler=None, texinputs=None):
         pdf = output_dir / "translated.pdf"
         pdf.write_bytes(b"pdf")
         return LatexCompileResult(pdf)
@@ -156,7 +156,7 @@ def test_latex_retry_reuses_registered_translated_tex(isolated_storage, monkeypa
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not parse")),
     )
 
-    def compile_ok(path, output_dir, compiler=None):
+    def compile_ok(path, output_dir, compiler=None, texinputs=None):
         assert path == translated_tex
         assert r"\usepackage[UTF8,fontset=none]{ctex}" in path.read_text(encoding="utf-8")
         pdf = output_dir / "translated.pdf"
@@ -206,7 +206,7 @@ def test_tex_project_latex_retry_reuses_registered_translated_tex(
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not translate again")),
     )
 
-    def compile_ok(path, output_dir, compiler=None):
+    def compile_ok(path, output_dir, compiler=None, texinputs=None):
         assert path == source.parent / "__translated.tex"
         assert "译文" in path.read_text(encoding="utf-8")
         pdf = output_dir / "__translated.pdf"
@@ -231,3 +231,105 @@ def test_extraction_checkpoint_ignores_non_object_json(
     checkpoint.write_text(json.dumps(payload), encoding="utf-8")
 
     assert document_pipeline._load_extraction_checkpoint(checkpoint, source) is None
+
+
+def _failing_tex_record(isolated_storage, monkeypatch, filename="resume-project.tex"):
+    """Run a tex_project pipeline that fails at translate; return (record, calls)."""
+    source = settings.upload_dir / filename
+    source.write_text(
+        "\\documentclass{article}\n\\begin{document}\nSource prose.\n\\end{document}\n",
+        encoding="utf-8",
+    )
+    record = document_pipeline.create_document_record(source, "tex_project", owner_user_id=1)
+    translate_calls: list[dict] = []
+
+    def compile_original(tex_path, output_dir, compiler=None, texinputs=None):
+        pdf = output_dir / f"{tex_path.stem}.pdf"
+        pdf.write_bytes(b"pdf")
+        return pdf
+
+    def failing_translate(*args, **kwargs):
+        translate_calls.append(kwargs)
+        raise RuntimeError("Translation incomplete: chunk 3 failed")
+
+    monkeypatch.setattr(document_pipeline, "compile_tex_project", compile_original)
+    monkeypatch.setattr(document_pipeline, "translate_latex_document", failing_translate)
+
+    first = document_pipeline.process_document(record)
+    assert first.status == "failed"
+    assert first.failure is not None
+    assert first.failure.stage == "translate"
+    assert first.failure.chunk == 3
+    assert translate_calls and "checkpoint_path" in translate_calls[0]
+    assert "progress_callback" in translate_calls[0]
+    return first, translate_calls
+
+
+def test_tex_retry_from_translate_resumes_checkpoint(isolated_storage, monkeypatch):
+    first, _ = _failing_tex_record(isolated_storage, monkeypatch)
+    checkpoint = settings.output_dir / first.document_id / "translation-checkpoint.json"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_text(
+        json.dumps({"version": "ir-translation-v2", "segments": {}}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        document_pipeline,
+        "compile_tex_project",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not compile original again")),
+    )
+
+    def translate_ok(*args, **kwargs):
+        assert kwargs["checkpoint_path"] == checkpoint
+        assert callable(kwargs["progress_callback"])
+        return "\\documentclass{article}\n\\begin{document}\n译文\n\\end{document}\n"
+
+    def compile_ok(path, output_dir, compiler=None, texinputs=None):
+        assert path == first.source_path.parent / "__translated.tex"
+        pdf = output_dir / "__translated.pdf"
+        pdf.write_bytes(b"pdf")
+        return LatexCompileResult(pdf)
+
+    monkeypatch.setattr(document_pipeline, "translate_latex_document", translate_ok)
+    monkeypatch.setattr(document_pipeline, "compile_tex_project_with_fallback", compile_ok)
+
+    second = document_pipeline.process_document(first, resume_from="translate")
+
+    assert second.status == "done", second.logs
+    assert second.failure is None
+    assert any("Resuming LaTeX translation from checkpoint" in log for log in second.logs)
+
+
+def test_tex_retry_from_translate_without_checkpoint_restarts_compile(
+    isolated_storage, monkeypatch
+):
+    first, _ = _failing_tex_record(isolated_storage, monkeypatch)
+    compile_calls: list[int] = []
+
+    def compile_original(tex_path, output_dir, compiler=None, texinputs=None):
+        compile_calls.append(1)
+        pdf = output_dir / f"{tex_path.stem}.pdf"
+        pdf.write_bytes(b"pdf")
+        return pdf
+
+    def translate_ok(*args, **kwargs):
+        return "\\documentclass{article}\n\\begin{document}\n译文\n\\end{document}\n"
+
+    def compile_ok(path, output_dir, compiler=None, texinputs=None):
+        pdf = output_dir / "__translated.pdf"
+        pdf.write_bytes(b"pdf")
+        return LatexCompileResult(pdf)
+
+    monkeypatch.setattr(document_pipeline, "compile_tex_project", compile_original)
+    monkeypatch.setattr(document_pipeline, "translate_latex_document", translate_ok)
+    monkeypatch.setattr(document_pipeline, "compile_tex_project_with_fallback", compile_ok)
+
+    second = document_pipeline.process_document(first, resume_from="translate")
+
+    assert second.status == "done", second.logs
+    assert len(compile_calls) == 1, "fallback must rebuild the original compile state"
+    assert any(
+        "Translation checkpoint missing; restarting from compile" in log
+        for log in second.logs
+    )

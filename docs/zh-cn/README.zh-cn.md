@@ -1,12 +1,12 @@
-# PaperReader v2.1.7
+# PaperReader v2.1.8
 
 [English](../../README.md) | 简体中文
 
-[下载 Windows / macOS v2.1.7](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.7) · [升级指南](../UPGRADING.md) · [发布说明](releases/v2.1.7.md)
+[下载 Windows / macOS v2.1.8](https://github.com/Mars-Dingdang/PaperReader/releases/tag/v2.1.8) · [升级指南](../UPGRADING.md) · [发布说明](releases/v2.1.8.md)
 
 > 📖 **下载前请先阅读[用户说明书](../user_instruction.md)**，其中包含安装（含 Windows 安装包"解除锁定"步骤，可避免绝大多数启动失败）、首次运行的服务商配置、论文提交、历史记录、产物文件与 AI 对话等说明。
 
-v2.1.7 修复了 macOS 桌面版译文 PDF 编译问题：`LATEXMK_PATH` 为绝对路径时的 TeX 引擎发现、可移植的中文字体选择，以及 strict 构建的警告处理。详见[发布说明](releases/v2.1.7.md)。前端/API 版本号：`2.1.7`。
+v2.1.8 将 LaTeX 链路与 PDF 链路对齐：多文件 TeX 项目先扁平化再翻译，翻译过程逐片段上报进度，失败后从片段断点恢复而不是从头重来。详见[发布说明](releases/v2.1.8.md)。前端/API 版本号：`2.1.8`。
 
 ![](../../images/demo1.png)
 
