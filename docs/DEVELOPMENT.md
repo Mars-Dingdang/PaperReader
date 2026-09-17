@@ -11,6 +11,8 @@ npm.cmd --prefix frontend run build
 
 `backend/tests/test_document_structure.py` 覆盖 Figure/Table 顺序、引用文件、双 PDF 页码、标题行优先于正文引用的定位，以及插图/表格线的紧裁剪缩略图（原文与译文双侧）。将 `Denoise.pdf` 与 `Denoise.tar.gz` 放到本地 `testexamples/` 后，同一测试命令还会检查该论文的 11 个 Figure、13 个 Table 及对应页码；CI 无样例时跳过此项。`testexamples/` 由 Git 忽略。
 
+选区回归路径：原文与译文分别在连续滚动、单页模式下拖选文字，普通右键或 macOS Control-click 打开菜单后选区应保持可见；检查“问 AI”、对照定位与批注保存使用原选中文本，备注输入框可正常输入；关闭菜单后可重新拖选。`Page` 的 `onRenderTextLayerSuccess` 回调应保持稳定，菜单状态或备注变化不能重建文字层。
+
 浏览器回归路径：在已显示文字的页首次执行对照高亮；跳转到未渲染的远端页；点击批注查看备注；打开图表浮层，分别点击 Figure、Table 及同页多个 Table；切换论文并确认列表更新。文字高亮在 `onRenderTextLayerSuccess` 后绘制。图表结构接口返回原文 `figures` 与译文 `translated_figures`，预览位于 `outputs/<document_id>/figure-previews/`，编译 PDF 更新后刷新。LaTeX 缩略图按标题旁的矢量插图、嵌入图片与表格横线裁剪，不再依赖 hyperref 浮动体锚点。
 
 个人中心密钥回归需分别验证大模型更新、MinerU 更新、留空保持和明确删除。新配置默认 MinerU；其 Key 缺失只阻止采用 MinerU 的 PDF 上传。

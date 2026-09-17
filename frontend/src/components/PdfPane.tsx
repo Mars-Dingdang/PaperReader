@@ -179,6 +179,13 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
   const progressValueRef = useRef<{ page: number; ratio: number } | null>(null)
   const restoredPositionRef = useRef(false)
   const renderWaitersRef = useRef<Map<number, Array<() => void>>>(new Map())
+  const pageRenderedRef = useRef(handlePageRendered)
+  pageRenderedRef.current = handlePageRendered
+  // react-pdf rebuilds the text layer when this callback changes, clearing selections.
+  const textLayerCallbacks = useMemo(
+    () => Array.from({ length: numPages }, (_, index) => () => pageRenderedRef.current(index + 1)),
+    [numPages]
+  )
 
   const effectiveUrl = overrideUrl || pdfUrl
   const effectiveTitle = overrideUrl ? (overrideTitle || '已覆盖') : title
@@ -625,6 +632,17 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
     }
   }))
 
+  function handleTextMouseDown(event: React.MouseEvent) {
+    if (event.button !== 2 && !(event.button === 0 && event.ctrlKey)) return
+    const selection = window.getSelection()
+    if (selection?.toString().trim() &&
+      scrollRef.current?.contains(selection.anchorNode) &&
+      scrollRef.current.contains(selection.focusNode)) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+  }
+
   function handleTextContextMenu(event: React.MouseEvent) {
     const target = event.target as HTMLElement
     const highlighted = Boolean(
@@ -875,7 +893,7 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
             width={containerWidth}
             renderTextLayer
             renderAnnotationLayer
-            onRenderTextLayerSuccess={() => handlePageRendered(page)}
+            onRenderTextLayerSuccess={textLayerCallbacks[index]}
           />
         ) : (
           <div className="pdf-page-placeholder">
@@ -1056,6 +1074,7 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
           </div>
         )}
         <div className="pdf-canvas-wrap" ref={scrollRef} onContextMenu={handleTextContextMenu}
+          onMouseDownCapture={handleTextMouseDown}
           onClick={(event) => {
             if (window.getSelection()?.toString().trim()) return
             const id = (event.target as HTMLElement).closest<HTMLElement>('[data-annotation-id]')?.dataset.annotationId
@@ -1086,7 +1105,7 @@ export const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({
                   width={containerWidth}
                   renderTextLayer
                   renderAnnotationLayer
-                  onRenderTextLayerSuccess={() => handlePageRendered(pageNumber)}
+                  onRenderTextLayerSuccess={textLayerCallbacks[pageNumber - 1]}
                 />
               </div>
             )}
